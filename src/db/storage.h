@@ -242,6 +242,13 @@ namespace db
     expect<std::vector<account_address>>
       reject_requests(request req, epee::span<const account_address> addresses);
 
+    //! Status of an `update` request
+    struct updated
+    {
+      std::vector<webhook_tx_spend> spend_pubs;
+      std::vector<webhook_tx_confirmation> confirm_pubs;
+      std::size_t accounts_updated;
+    };
     /*!
       Updates the status of user accounts, even if inactive or hidden. Duplicate
       receives or spends provided in `accts` are silently ignored. If a gap in
@@ -252,9 +259,9 @@ namespace db
       \param chain List of block hashes that `accts` were scanned against.
       \param accts Updated to `height + chain.size()` scan height.
 
-      \return True iff LMDB successfully committed the update.
+      \return Status via `updated` object.
     */
-    expect<std::pair<std::size_t, std::vector<webhook_tx_confirmation>>>
+    expect<updated>
       update(block_id height, epee::span<const crypto::hash> chain, epee::span<const lws::account> accts);
 
     /*!
