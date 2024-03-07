@@ -1059,6 +1059,7 @@ namespace lws
       lmdb::suspended_txn read_txn{};
       db::cursor::accounts accounts_cur{};
       boost::unique_lock<boost::mutex> lock{self.sync};
+      lws::rpc::account_push pusher = MONERO_UNWRAP(ctx.bind_push());
 
       while (scanner::is_running())
       {
