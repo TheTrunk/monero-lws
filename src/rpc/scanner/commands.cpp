@@ -1,4 +1,4 @@
-// Copyright (c) 2020, The Monero Project
+// Copyright (c) 2024, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -25,14 +25,61 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include "commands.h"
 
-namespace lws
+#include "db/account.h"
+#include "db/data.h"
+#include "wire/adapted/crypto.h"
+#include "wire/vector.h"
+#include "wire/msgpack.h"
+#include "wire/wrapper/trusted_array.h"
+
+namespace lws { namespace rpc { namespace scanner
 {
-  namespace rpc
+  namespace
   {
-    class client;
+    template<typename F, typename T>
+    void map_account_update(F& format, T& self)
+    {
+      wire::object(format,
+        wire::optional_field<0>("users", wire::trusted_array(std::ref(self.users))),
+        wire::optional_field<1>("blocks", wire::trusted_array(std::ref(self.blocks)))
+      );
+    }
+  } 
+  WIRE_MSGPACK_DEFINE_OBJECT(update_accounts, map_account_update)
+
+  namespace
+  {
+    template<typename F, typename T>
+    void map_give_accounts(F& format, T& self)
+    {
+      wire::object(format,
+        wire::optional_field<0>("users", wire::trusted_array(std::ref(self.users)))
+      );
+    }
   }
-  struct rates;
-  class scan_manager;  
-}
+  WIRE_MSGPACK_DEFINE_OBJECT(give_accounts, map_give_accounts);
+
+  namespace
+  {
+    template<typename F, typename T>
+    void map_push_accounts(F& format, T& self)
+    {
+      wire::object(format,
+        wire::optional_field<0>("users", wire::trusted_array(std::ref(self.users)))
+      );
+    }
+  }
+  WIRE_MSGPACK_DEFINE_OBJECT(push_accounts, map_push_accounts);
+
+  namespace
+  {
+    template<typename F, typename T>
+    void map_take_accounts(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD_ID(0, count));
+    }
+  }
+  WIRE_MSGPACK_DEFINE_OBJECT(take_accounts, map_take_accounts);
+}}} // lws // rpc // scanner

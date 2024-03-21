@@ -378,6 +378,9 @@ namespace rpc
 
   expect<void> client::enable_pull_accounts()
   {
+    MONERO_PRECOND(ctx != nullptr);
+    MONERO_PRECOND(account_pull == nullptr);
+
     detail::socket new_sock{zmq_socket(ctx->comm.get(), ZMQ_PULL)};
     if (new_sock == nullptr)
       return {net::zmq::get_error_code()};
