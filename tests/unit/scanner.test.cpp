@@ -526,9 +526,13 @@ LWS_CASE("lws::scanner::sync and lws::scanner::run")
       bmessage.output_indices.resize(1);
       messages.push_back(daemon_response(bmessage));
       {
+        static constexpr const lws::scanner_options opts{
+          epee::net_utils::ssl_verification_t::none, true, false
+        };
+
         boost::thread server_thread(&lws_test::rpc_thread, rpc.zmq_context(), std::cref(messages));
         const join on_scope_exit{server_thread};
-        lws::scanner::run(db.clone(), std::move(rpc), 1, epee::net_utils::ssl_verification_t::none, true);
+        lws::scanner::run(db.clone(), std::move(rpc), 1, opts);
       }
 
       hashes.push_back(cryptonote::get_block_hash(bmessage.blocks.back().block));

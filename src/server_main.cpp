@@ -297,7 +297,7 @@ namespace
       MINFO("Listening for REST admin clients at " << address);
 
     // blocks until SIGINT
-    lws::scanner::run(std::move(disk), std::move(ctx), prog.scan_threads, webhook_verify, enable_subaddresses, prog.untrusted_daemon);
+    lws::scanner::run(std::move(disk), std::move(ctx), prog.scan_threads, lws::scanner_options{webhook_verify, enable_subaddresses, prog.untrusted_daemon});
   }
 } // anonymous
 

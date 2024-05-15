@@ -99,23 +99,17 @@ namespace lws
       std::atomic<bool> update;
     };
 
-    struct options
-    {
-      net::ssl_verification_t webhook_verify;
-      bool enable_subaddresses;
-      bool untrusted_daemon;
-    };
-
+    
     struct thread_data
     {
-      explicit thread_data(rpc::client client, db::storage disk, std::vector<lws::account> users, options opts)
-        : client(std::move(client)), disk(std::move(disk)), users(std::move(users)), opts(opts)
+      explicit thread_data(rpc::client client, db::storage disk, std::vector<lws::account> users, scanner_options opts)
+        : client(std::move(client)), disk(std::move(disk)), users(std::move(users)), opts(std::move(opts))
       {}
 
       rpc::client client;
       db::storage disk;
       std::vector<lws::account> users;
-      options opts;
+      scanner_options opts;
     };
 
     // until we have a signal-handler safe notification system
@@ -134,7 +128,7 @@ namespace lws
       }
     }
 
-    bool is_new_block(std::string&& chain_msg, db::storage& disk, const account& user)
+    bool is_new_block(std::string&& chain_msg, std::optional<db::storage>& disk, const account& user)
     {
       const auto chain = rpc::minimal_chain_pub::from_json(std::move(chain_msg));
       if (!chain)
@@ -146,7 +140,13 @@ namespace lws
       if (user.scan_height() < db::block_id(chain->top_block_height))
         return true;
 
-      auto reader = disk.start_read();
+      if (!disk)
+      {
+        MWARNING("Assuming new block - no access to local DB");
+        return true;
+      }
+
+      auto reader = disk->start_read();
       if (!reader)
       {
         MWARNING("Failed to start DB read: " << reader.error());
@@ -173,6 +173,11 @@ namespace lws
         MONERO_THROW(sent.error(), "Failed to send ZMQ RPC message");
       }
       return true;
+    }
+
+    void send_payment_hook(rpc::client& client, const epee::span<const db::webhook_tx_confirmation> events, net::ssl_verification_t verify_mode)
+    {
+      rpc::send_webhook(client, events, "json-full-payment_hook:", "msgpack-full-payment_hook:", std::chrono::seconds{5}, verify_mode);
     }
  
     std::size_t get_target_time(db::block_id height)
@@ -216,15 +221,7 @@ namespace lws
     {
       rpc::send_webhook(client, events, "json-full-spend_hook:", "msgpack-full-spend_hook:", std::chrono::seconds{5}, verify_mode);
     }
-
-    struct by_height
-    {
-      bool operator()(account const& left, account const& right) const noexcept
-      {
-        return left.scan_height() < right.scan_height();
-      }
-    };
-
+ 
     struct add_spend
     {
       void operator()(lws::account& user, const db::spend& spend) const
@@ -307,7 +304,7 @@ namespace lws
           else
             events.pop_back(); //cannot compute tx_hash
         }
-        scanner::send_payment_hook(client_, epee::to_span(events), verify_mode_);
+        send_payment_hook(client_, epee::to_span(events), verify_mode_);
         return true;
       }
     };
@@ -317,12 +314,12 @@ namespace lws
       expect<db::storage_reader> reader;
       db::cursor::subaddress_indexes cur;
 
-      subaddress_reader(db::storage const& disk, const bool enable_subaddresses)
+      subaddress_reader(std::optional<db::storage> const& disk, const bool enable_subaddresses)
         : reader(common_error::kInvalidArgument), cur(nullptr)
       {
-        if (enable_subaddresses)
+        if (disk && enable_subaddresses)
         {
-          reader = disk.start_read();
+          reader = disk->start_read();
           if (!reader)
             MERROR("Subadress lookup failure: " << reader.error().message());
         }
@@ -583,7 +580,7 @@ namespace lws
       scan_transaction_base(users, height, timestamp, tx_hash, tx, out_ids, reader, add_spend{}, add_output{});
     }
 
-    void scan_transactions(std::string&& txpool_msg, epee::span<lws::account> users, db::storage const& disk, rpc::client& client, const options& opts)
+    void scan_transactions(std::string&& txpool_msg, epee::span<lws::account> users, db::storage const& disk, rpc::client& client, const scanner_options& opts)
     {
       // uint64::max is for txpool
       static const std::vector<std::uint64_t> fake_outs(
@@ -600,7 +597,7 @@ namespace lws
       const auto time =
         boost::numeric_cast<std::uint64_t>(std::chrono::system_clock::to_time_t(std::chrono::system_clock::now()));
 
-      subaddress_reader reader{disk, opts.enable_subaddresses};
+      subaddress_reader reader{std::optional<db::storage>{disk.clone()}, opts.enable_subaddresses};
       send_webhook sender{disk, client, opts.webhook_verify};
       for (const auto& tx : parsed->txes)
         scan_transaction_base(users, db::block_id::txpool, time, crypto::hash{}, tx, fake_outs, reader, null_spend{}, sender);
@@ -614,21 +611,18 @@ namespace lws
       else if (*new_rates)
         MINFO("Updated exchange rates: " << *(*new_rates));
     }
-  //} // anonymous
 
-    void scan_loop(thread_sync& self, std::shared_ptr<thread_data> data, const bool untrusted_daemon, const bool leader_thread) noexcept
+    void do_scan_loop(thread_sync& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
     {
+      // thread entry point, so wrap everything in `try { } catch (...) {}`
       try
-      {
+      { 
         // boost::thread doesn't support move-only types + attributes
         rpc::client client{std::move(data->client)};
         db::storage disk{std::move(data->disk)};
         std::vector<lws::account> users{std::move(data->users)};
-        const options opts = std::move(data->opts);
-
-        assert(!users.empty());
-        assert(std::is_sorted(users.begin(), users.end(), by_height{}));
-
+        const scanner_options opts{std::move(data->opts)};
+        
         data.reset();
 
         struct stop_
@@ -641,12 +635,37 @@ namespace lws
           }
         } stop{self};
 
+        user_data store_local{disk.clone()};
+        scanner::loop(self.update, std::move(store_local), std::move(disk), std::move(client), std::move(users), std::move(opts), leader_thread);
+      }
+      catch (std::exception const& e)
+      {
+        scanner::stop();
+        MERROR(e.what());
+      }
+      catch (...)
+      {
+        scanner::stop();
+        MERROR("Unknown exception");
+      }
+    }
+  } // anonymous
+
+    void scanner::loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, const scanner_options& opts, const bool leader_thread) 
+    {
+      if (users.empty())
+        throw std::runtime_error{"scanner::loop given empty user list"};
+
+      try
+      {
+        std::sort(users.begin(), users.end(), by_height{});
+
         // RPC server assumes that `start_height == 0` means use
         // block ids. This technically skips genesis block.
         cryptonote::rpc::GetBlocksFast::Request req{};
         req.start_height = std::uint64_t(users.begin()->scan_height());
         req.start_height = std::max(std::uint64_t(1), req.start_height);
-        req.prune = !untrusted_daemon;
+        req.prune = !opts.untrusted_daemon;
 
         epee::byte_slice block_request = rpc::client::make_message("get_blocks_fast", req);
         if (!send(client, block_request.clone()))
@@ -656,9 +675,11 @@ namespace lws
         std::vector<db::pow_sync> new_pow{};
         db::pow_window pow_window{};
 
-        const db::block_info last_checkpoint = db::storage::get_last_checkpoint();
-        const db::block_id last_pow = MONERO_UNWRAP(MONERO_UNWRAP(disk.start_read()).get_last_pow_block()).id;
-        while (!self.update && scanner::is_running())
+        db::block_id last_pow{};
+        if (opts.untrusted_daemon && disk)
+          last_pow = MONERO_UNWRAP(MONERO_UNWRAP(disk->start_read()).get_last_pow_block()).id;
+
+        while (!stop && scanner::is_running())
         {
           blockchain.clear();
           new_pow.clear();
@@ -743,9 +764,9 @@ namespace lws
               auto message = new_pubs->begin();
               for ( ; message != new_pubs->end(); ++message)
               {
-                if (message->first != rpc::client::topic::txpool)
+                if (!disk || message->first != rpc::client::topic::txpool)
                   break; // inner for loop
-                scan_transactions(std::move(message->second), epee::to_mut_span(users), disk, client, opts);
+                scan_transactions(std::move(message->second), epee::to_mut_span(users), *disk, client, opts);
               }
 
               for ( ; message != new_pubs->end(); ++message)
@@ -769,7 +790,7 @@ namespace lws
             throw std::runtime_error{"Bad daemon response - need same number of blocks and indices"};
 
           blockchain.push_back(cryptonote::get_block_hash(fetched->blocks.front().block));
-          if (untrusted_daemon)
+          if (opts.untrusted_daemon)
             new_pow.push_back(db::pow_sync{fetched->blocks.front().block.timestamp});
 
           auto blocks = epee::to_mut_span(fetched->blocks);
@@ -784,10 +805,10 @@ namespace lws
           else
             fetched->start_height = 0;
 
-          if (untrusted_daemon)
+          if (disk && opts.untrusted_daemon)
           {
             pow_window = MONERO_UNWRAP(
-              MONERO_UNWRAP(disk.start_read()).get_pow_window(db::block_id(fetched->start_height))
+              MONERO_UNWRAP(disk->start_read()).get_pow_window(db::block_id(fetched->start_height))
             );
           }
 
@@ -822,7 +843,7 @@ namespace lws
               reader
             );
 
-            if (untrusted_daemon)
+            if (opts.untrusted_daemon)
             {
               if (block.prev_id != blockchain.back())
                 MONERO_THROW(error::bad_blockchain, "A blocks prev_id does not match");
@@ -840,13 +861,13 @@ namespace lws
               diff = cryptonote::next_difficulty(pow_window.pow_timestamps, pow_window.cumulative_diffs, get_target_time(db::block_id(fetched->start_height)));
 
               // skip POW hashing if done previously
-              if (last_pow < db::block_id(fetched->start_height))
+              if (disk && last_pow < db::block_id(fetched->start_height))
               {
                 if (!verify_timestamp(block.timestamp, pow_window.median_timestamps))
                   MONERO_THROW(error::bad_blockchain, "Block failed timestamp check - possible chain forgery");
 
                 const crypto::hash pow =
-                  get_block_longhash(get_block_hashing_blob(block), db::block_id(fetched->start_height), block.major_version, disk, initial_height, epee::to_span(blockchain));
+                  get_block_longhash(get_block_hashing_blob(block), db::block_id(fetched->start_height), block.major_version, *disk, initial_height, epee::to_span(blockchain));
                 if (!cryptonote::check_hash(pow, diff))
                   MONERO_THROW(error::bad_blockchain, "Block had too low difficulty");
               }
@@ -858,7 +879,7 @@ namespace lws
 
             for (auto tx_data : boost::combine(block.tx_hashes, txes, indices))
             {
-              if (untrusted_daemon)
+              if (opts.untrusted_daemon)
               {
                 if (cryptonote::get_transaction_hash(boost::get<1>(tx_data)) != boost::get<0>(tx_data))
                   MONERO_THROW(error::bad_blockchain, "Hash of transaction does not match hash in block");
@@ -875,7 +896,7 @@ namespace lws
               );
             }
 
-            if (untrusted_daemon)
+            if (opts.untrusted_daemon)
             {
               const auto last_difficulty =
                 pow_window.cumulative_diffs.empty() ?
@@ -891,44 +912,17 @@ namespace lws
           } // for each block
 
           reader.reader = std::error_code{common_error::kInvalidArgument}; // cleanup reader before next write
-          auto updated = disk.update(
-            users.front().scan_height(), epee::to_span(blockchain), epee::to_span(users), epee::to_span(new_pow)
-          );
-          if (!updated)
-          {
-            if (updated == lws::error::blockchain_reorg)
-            {
-              MINFO("Blockchain reorg detected, resetting state");
-              return;
-            }
-            MONERO_THROW(updated.error(), "Failed to update accounts on disk");
-          }
+          if (!store(client, epee::to_span(blockchain), epee::to_span(users), epee::to_span(new_pow), opts))
+            return;
 
-          if (untrusted_daemon && leader_thread && fetched->start_height % 4 == 0 && last_pow < db::block_id(fetched->start_height))
+          // TODO         
+          if (opts.untrusted_daemon && leader_thread && fetched->start_height % 4 == 0 && last_pow < db::block_id(fetched->start_height))
           {
             MINFO("On chain with hash " << blockchain.back() << " and difficulty " << diff << " at height " << fetched->start_height);
           }
 
-          MINFO("Processed " << blocks.size() << " block(s) against " << users.size() << " account(s)");
-<<<<<<< HEAD
-          send_payment_hook(client, epee::to_span(updated->confirm_pubs), opts.webhook_verify);
-          send_spend_hook(client, epee::to_span(updated->spend_pubs), opts.webhook_verify);
-          if (updated->accounts_updated != users.size())
-=======
-          scanner::send_payment_hook(client, epee::to_span(updated->second), opts.webhook_verify);
-          if (updated->first != users.size())
->>>>>>> 326bfb1 (Add remote scanning capabilities (wip))
-          {
-            MWARNING("Only updated " << updated->accounts_updated << " account(s) out of " << users.size() << ", resetting");
-            return;
-          }
-
           for (account& user : users)
             user.updated(db::block_id(fetched->start_height));
-
-          // Publish when all scan threads have past this block
-          if (!blockchain.empty() && client.has_publish())
-            rpc::publish_scanned(client, blockchain.back(), epee::to_span(users));
         }
       }
       catch (std::exception const& e)
@@ -943,13 +937,13 @@ namespace lws
       }
     } // end scan_loop
 
-  //namespace
-  //{ 
+  namespace
+  { 
     /*!
       Launches `thread_count` threads to run `scan_loop`, and then polls for
       active account changes in background
     */
-    void check_loop(db::storage disk, rpc::context& ctx, std::size_t thread_count, std::vector<lws::account> users, std::vector<db::account_id> active, const options opts)
+    void check_loop(db::storage disk, rpc::context& ctx, std::size_t thread_count, std::vector<lws::account> users, std::vector<db::account_id> active, const scanner_options& opts)
     {
       assert(0 < thread_count);
       assert(0 < users.size());
@@ -1019,7 +1013,7 @@ namespace lws
         auto data = std::make_shared<thread_data>(
           std::move(client), disk.clone(), std::move(thread_users), opts
         );
-        threads.emplace_back(attrs, std::bind(&scan_loop, std::ref(self), std::move(data), opts.untrusted_daemon, leader_thread));
+        threads.emplace_back(attrs, std::bind(&do_scan_loop, std::ref(self), std::move(data), leader_thread));
         leader_thread = false;
       }
 
@@ -1032,11 +1026,8 @@ namespace lws
         auto data = std::make_shared<thread_data>(
           std::move(client), disk.clone(), std::move(users), opts
         );
-        threads.emplace_back(attrs, std::bind(&scan_loop, std::ref(self), std::move(data), opts.untrusted_daemon, leader_thread));
-<<<<<<< HEAD
+        threads.emplace_back(attrs, std::bind(&do_scan_loop, std::ref(self), std::move(data), leader_thread));
         remaining_threads = false;
-=======
->>>>>>> 326bfb1 (Add remote scanning capabilities (wip))
       }
 
       auto last_check = std::chrono::steady_clock::now();
@@ -1044,7 +1035,6 @@ namespace lws
       lmdb::suspended_txn read_txn{};
       db::cursor::accounts accounts_cur{};
       boost::unique_lock<boost::mutex> lock{self.sync};
-      lws::rpc::account_push pusher = MONERO_UNWRAP(ctx.bind_push());
 
       while (scanner::is_running())
       {
@@ -1328,10 +1318,45 @@ namespace lws
     }
   } // anonymous
 
-  void scanner::send_payment_hook(rpc::client& client, const epee::span<const db::webhook_tx_confirmation> events, net::ssl_verification_t verify_mode)
+  bool user_data::store(db::storage& disk, rpc::client& client, const epee::span<const crypto::hash> chain, const epee::span<const lws::account> users, const epee::span<const db::pow_sync> pow, const scanner_options& opts)
   {
-    rpc::send_webhook(client, events, "json-full-payment_hook:", "msgpack-full-payment_hook:", std::chrono::seconds{5}, verify_mode);
+    if (users.empty())
+      return true;
+    if (!std::is_sorted(users.begin(), users.end(), by_height{}))
+      throw std::logic_error{"users must be sorted!"};
+
+    auto updated = disk.update(users[0].scan_height(), chain, users, pow);
+    if (!updated)
+    {
+      if (updated == lws::error::blockchain_reorg)
+      {
+        MINFO("Blockchain reorg detected, resetting state");
+        return false;
+      }
+      MONERO_THROW(updated.error(), "Failed to update accounts on disk");
+    }
+
+    MINFO("Processed " << chain.size() << " block(s) against " << users.size() << " account(s)");
+    send_payment_hook(client, epee::to_span(updated->confirm_pubs), opts.webhook_verify);
+    send_spend_hook(client, epee::to_span(updated->spend_pubs), opts.webhook_verify);
+    if (updated->accounts_updated != users.size())
+    {
+      MWARNING("Only updated " << updated->accounts_updated << " account(s) out of " << users.size() << ", resetting");
+      return false;
+    }
+
+    // Publish when all scan threads have past this block
+    // only address is printed from users, so height doesn't need updating
+    if (!chain.empty() && client.has_publish())
+      rpc::publish_scanned(client, chain[chain.size() - 1], epee::to_span(users));
+
+    return true;
   }
+
+  bool user_data::operator()(rpc::client& client, const epee::span<const crypto::hash> chain, const epee::span<const lws::account> users, const epee::span<const db::pow_sync> pow, const scanner_options& opts)
+  {
+    return store(disk_, client, chain, users, pow, opts);
+  } 
 
   expect<rpc::client> scanner::sync(db::storage disk, rpc::client client, const bool untrusted_daemon)
   {
@@ -1340,7 +1365,7 @@ namespace lws
     return sync_quick(std::move(disk), std::move(client));
   }
 
-  void scanner::run(db::storage disk, rpc::context ctx, std::size_t thread_count, const epee::net_utils::ssl_verification_t webhook_verify, const bool enable_subaddresses, const bool untrusted_daemon)
+  void scanner::run(db::storage disk, rpc::context ctx, std::size_t thread_count, const scanner_options& opts)
   {
     thread_count = std::max(std::size_t(1), thread_count);
 
@@ -1378,7 +1403,7 @@ namespace lws
         checked_wait(account_poll_interval - (std::chrono::steady_clock::now() - last));
       }
       else
-        check_loop(disk.clone(), ctx, thread_count, std::move(users), std::move(active), options{webhook_verify, enable_subaddresses, untrusted_daemon});
+        check_loop(disk.clone(), ctx, thread_count, std::move(users), std::move(active), opts);
 
       if (!scanner::is_running())
         return;
@@ -1386,7 +1411,7 @@ namespace lws
       if (!client)
         client = MONERO_UNWRAP(ctx.connect());
 
-      expect<rpc::client> synced = sync(disk.clone(), std::move(client), untrusted_daemon);
+      expect<rpc::client> synced = sync(disk.clone(), std::move(client), opts.untrusted_daemon);
       if (!synced)
       {
         if (!synced.matches(std::errc::timed_out))

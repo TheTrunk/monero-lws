@@ -26,40 +26,51 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <memory>
-#include <string>
+#include <boost/thread/lock_guard.hpp>
+#include <boost/thread/mutex.hpp>
+#include <deque>
+#include <variant>
 
-#include "rpc/scanner/queue.h"
+#include "rpc/scanner/commands.h"
 
 namespace lws { namespace rpc { namespace scanner
 {
-  struct client_connection;
-
-  //! \brief 
-  class client
+  class queue
   {
-    friend class client_connection;
-
-    boost::asio::io_service context_;
-    std::shared_ptr<client_connection> conn_;
-    std::vector<std::shared_ptr<queue>> local_;
-    const boost::asio::ip::tcp::endpoint server_address_;
-    std::string pass_;
+    std::vector<lws::account> replace_;
+    std::vector<lws::account> push_;
+    std::size_t user_count_;
+    boost::mutex sync_;
 
   public:
-    //! Server `address` and list of `local` thread queues
-    explicit client(const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
+    //! Set of accounts to scan
+    struct status
+    {
+      std::vector<lws::account> replace;
+      std::vector<lws::account> push;
+      std::size_t user_count;
+    };
 
-    client(const client&) = delete;
-    client(client&&) = delete;
-    ~client();
-    client& operator=(const client&) = delete;
-    client& operator=(client&&) = delete;
+    queue()
+      : replace_(), push_(), user_count_(0), sync_()
+    {}
 
-    boost::asio::io_service& context() { return context_; }
-    const boost::asio::ip::tcp::endpoint& server_address() const { return server_address_; }
-    void reconnect();
+    //! \return Total number of users given to this local thread
+    std::size_t user_count();
+
+    //! \return Replacement and "push" accounts
+    status get_accounts();
+
+    //! Replace existing accounts on thread with new `users`
+    void replace_accounts(std::vector<lws::account> users);
+
+    //! Push/add new accounts to scan on thread
+    template<typename T>
+    void push_accounts(T begin, T end)
+    {
+      const boost::lock_guard<boost::mutex> lock{sync_};
+      user_count_ += (end - begin);
+      push_.insert(push_.end(), begin, end);
+    }
   };
 }}} // lws // rpc // scanner

@@ -39,6 +39,16 @@ namespace lws { namespace rpc { namespace scanner
   namespace
   {
     template<typename F, typename T>
+    void map_initialize(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD_ID(0, pass), WIRE_FIELD_ID(1, threads));
+    }
+  }
+  WIRE_MSGPACK_DEFINE_OBJECT(initialize, map_initialize);
+
+  namespace
+  {
+    template<typename F, typename T>
     void map_account_update(F& format, T& self)
     {
       wire::object(format,
@@ -48,18 +58,6 @@ namespace lws { namespace rpc { namespace scanner
     }
   } 
   WIRE_MSGPACK_DEFINE_OBJECT(update_accounts, map_account_update)
-
-  namespace
-  {
-    template<typename F, typename T>
-    void map_give_accounts(F& format, T& self)
-    {
-      wire::object(format,
-        wire::optional_field<0>("users", wire::trusted_array(std::ref(self.users)))
-      );
-    }
-  }
-  WIRE_MSGPACK_DEFINE_OBJECT(give_accounts, map_give_accounts);
 
   namespace
   {
@@ -76,10 +74,12 @@ namespace lws { namespace rpc { namespace scanner
   namespace
   {
     template<typename F, typename T>
-    void map_take_accounts(F& format, T& self)
+    void map_replace_accounts(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD_ID(0, count));
+      wire::object(format,
+        wire::optional_field<0>("users", wire::trusted_array(std::ref(self.users)))
+      );
     }
   }
-  WIRE_MSGPACK_DEFINE_OBJECT(take_accounts, map_take_accounts);
+  WIRE_MSGPACK_DEFINE_OBJECT(replace_accounts, map_replace_accounts);
 }}} // lws // rpc // scanner

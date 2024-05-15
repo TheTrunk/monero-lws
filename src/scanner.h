@@ -39,6 +39,39 @@
 
 namespace lws
 {
+  struct scanner_options
+  {
+    epee::net_utils::ssl_verification_t webhook_verify;
+    bool enable_subaddresses;
+    bool untrusted_daemon;
+  };
+
+  //! Used in `scan_loop` by server
+  class user_data
+  {
+    db::storage disk_;
+
+  public:
+    user_data(db::storage disk)
+      : disk_(std::move(disk))
+    {}
+
+    user_data(user_data const& rhs)
+      : disk_(rhs.disk_.clone())
+    {}
+
+    user_data(user_data&& rhs)
+      : disk_(std::move(rhs.disk_))
+    {}
+
+    /*! Store updated accounts locally (`disk`), and send ZMQ/RMQ/webhook
+      events. `users` must be sorted by height (lowest first). */
+    static bool store(db::storage& disk, rpc::client& zclient, epee::span<const crypto::hash> chain, epee::span<const lws::account> users, epee::span<const db::pow_sync> pow, const scanner_options&);
+
+    //! `users` must be sorted by height (lowest first)
+    bool operator()(rpc::client& zclient, epee::span<const crypto::hash> chain, epee::span<const lws::account> users, epee::span<const db::pow_sync> pow, const scanner_options&);
+  };
+
   //! Scans all active `db::account`s. Detects if another process changes active list.
   class scanner
   {
@@ -48,17 +81,17 @@ namespace lws
 
   public:
 
-    //! Send receive payment `events` to webhooks/zmq/rmq
-    static void send_payment_hook(rpc::client& client, epee::span<const db::webhook_tx_confirmation> events, epee::net_utils::ssl_verification_t verify_mode);
+    //! Callback for storing user account (typically local lmdb, but perhaps remote rpc)
+    using store_func = std::function<bool(rpc::client&, epee::span<const crypto::hash>, epee::span<const lws::account>, epee::span<const db::pow_sync>, const scanner_options&)>;
 
-    //! Blocks until `stop()` called.
-    //void scan_loop(thread_sync& self, std::shared_ptr<thread_data> data, const bool untrusted_daemon, const bool leader_thread) noexcept
-
+    //! Run _just_ the inner scanner loop. Calls `store` on account updates.
+    static void loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, const scanner_options& opts, bool leader_thread); 
+    
     //! Use `client` to sync blockchain data, and \return client if successful.
     static expect<rpc::client> sync(db::storage disk, rpc::client client, const bool untrusted_daemon = false);
 
     //! Poll daemon until `stop()` is called, using `thread_count` threads.
-    static void run(db::storage disk, rpc::context ctx, std::size_t thread_count, epee::net_utils::ssl_verification_t webhook_verify, bool enable_subaddresses, bool untrusted_daemon = false);
+    static void run(db::storage disk, rpc::context ctx, std::size_t thread_count, const scanner_options&);
 
     //! \return True if `stop()` has never been called.
     static bool is_running() noexcept { return running; }

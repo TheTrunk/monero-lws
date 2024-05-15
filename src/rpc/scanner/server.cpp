@@ -29,6 +29,7 @@
 
 #include <boost/asio/coroutine.hpp>
 #include <boost/lexical_cast.hpp>
+#include <boost/numeric/conversion/cast.hpp>
 #include <vector>
 #include "byte_slice.h"  // monero/contrib/epee/include
 #include "byte_stream.h" // monero/contrib/epee/include
@@ -58,17 +59,11 @@ namespace lws { namespace rpc { namespace scanner
       { return "reset_state / abort scan"; }
     };
 
-    //! \brief Handler for request to give accounts to another scanner
-    struct give_accounts_handler
+    //! \brief Handler for server to initialize new scanner
+    struct initialize_handler
     {
-      using input = give_accounts;
-      static bool handle(server_connection& self, std::vector<db::account_id> users);
-      static bool handle(const std::shared_ptr<server_connection>& self, input msg)
-      { 
-        if (!self)
-          return false;
-        return handle(*self, std::move(msg.users));
-      }
+      using input = initialize;
+      static bool handle(const std::shared_ptr<server_connection>& self, input msg);
     };
 
     //! \brief Handler for request to update accounts
@@ -84,17 +79,19 @@ namespace lws { namespace rpc { namespace scanner
   //! \brief Context/state for remote `monero-lws-scanner` instance.
   struct server_connection : connection
   {
+    server& parent_;
     db::storage disk_;
     rpc::client zclient_;
-    std::vector<db::account_id> accounts_; //!< Remote is scanning these accounts
-    ssl_verification_t webhook_verify_;
+    std::uint32_t threads_; //!< Number of scan threads at remote process
+    const ssl_verification_t webhook_verify_;
 
-    explicit server_connection(boost::asio::io_service& context, db::storage disk, rpc::client zclient, ssl_verification_t webhook_verify)
-      : connection(context),
-        disk_(std::move(disk)),
-        zclient_(std::move(zclient)),
-        accounts_(),
-        webhook_verify_(webhook_verify)
+    explicit server_connection(server& parent)
+      : connection(parent.context_),
+        parent_(parent),
+        disk_(parent.disk_.clone()),
+        zclient_(MONERO_UNWRAP(parent.zclient_.clone())),
+        threads_(0),
+        webhook_verify_(parent.webhook_verify_)
     {
       MINFO("New scanner client at " << remote_address());
     }
@@ -103,73 +100,76 @@ namespace lws { namespace rpc { namespace scanner
     static const std::array<command, 2>& commands() noexcept
     {
       static constexpr const std::array<command, 2> value{{
-        call<give_accounts_handler, server_connection>,
+        call<initialize_handler, server_connection>,
         call<update_accounts_handler, server_connection>
       }};
-      static_assert(give_accounts_handler::input::id() == 0);
+      static_assert(initialize_handler::input::id() == 0);
       static_assert(update_accounts_handler::input::id() == 1);
       return value;
     }
 
-    //! Pulls accounts from inproc ZMQ and pushes to remote TCP client
-    static void pull_push(std::shared_ptr<server_connection> self)
+    bool check_pass(const std::string& pass)
     {
-      if (!self)
-        return;
-
-      auto pulled = MONERO_UNWRAP(self->zclient_.pull_accounts());
-      if (pulled.empty())
-        return;
-
-      for (const auto& account : pulled)
-        self->accounts_.push_back(account.id());
-      if (!write_command(self, push_accounts{std::move(pulled)}))
-        self->cleanup();
+      return pass == parent_.pass_;
     }
-    
+
+    bool replace_users()
+    {
+      return parent_.replace_users();
+    }
+
     //! Cancels pending operations and "pushes" accounts to other processes
     void cleanup()
     {
       base_cleanup();
-      if (accounts_.empty())
-        return;
-      give_accounts_handler::handle(*this, std::move(accounts_));
-      accounts_.clear();
     }
   };
 
   namespace
   {
-    bool give_accounts_handler::handle(server_connection& self, std::vector<db::account_id> users)
+    bool initialize_handler::handle(const std::shared_ptr<server_connection>& self, const input msg)
     {
-      MINFO("Giving " << users.size() << " accounts from " << self.remote_address() << " to other scanners");
-      return false; 
+      if (!self)
+        return false;
+
+      if (self->threads_)
+      {
+        MERROR("Client ( " << self->remote_address() << ") invoked initialize twice, closing connection");
+        return false;
+      }
+
+      if (!msg.threads)
+      {
+        MERROR("Client (" << self->remote_address() << ") intialized with 0 threads");
+        return false;
+      }
+
+      if (!self->check_pass(msg.pass))
+      {
+        MERROR("Client (" << self->remote_address() << ") provided invalid pass");
+        return false;
+      }
+
+      self->threads_ = msg.threads;
+      if (self->replace_users())
+      {
+        MINFO("Initialization from remote scanner (" << self->remote_address() << ") - " << msg.threads << " thread(s)");
+        return true;
+      }
+      else
+        MERROR("Failed new initialization from remote scanner (" << self->remote_address() << ')');
+      return false;
     }
 
     bool update_accounts_handler::handle(const std::shared_ptr<server_connection>& self, input msg)
     {
+      static constexpr const scanner_options opts{
+        epee::net_utils::ssl_verification_t::system_ca, false, false
+      };
+ 
       std::sort(msg.users.begin(), msg.users.end(), by_height{});
-      auto updated = self->disk_.update(
-        msg.users.front().scan_height(), epee::to_span(msg.blocks), epee::to_span(msg.users), nullptr /* untrusted mode not allowed */
-      );
-
-      if (!updated)
-      {
-        if (updated == lws::error::blockchain_reorg)
-        {
-          MINFO("Blockchain reorg detected, resetting state");
-          throw reset_state{};
-        }
-        MONERO_THROW(updated.error(), "Failed to update accounts on disk");
-      }
-
-      MINFO("Processed (remotely at " << self->remote_address() << ") " << msg.blocks.size() << " block(s) against " << msg.users.size() << " account(s)");
-      lws::scanner::send_payment_hook(self->zclient_, epee::to_span(updated->second), self->webhook_verify_);
-      if (updated->first != self->accounts_.size())
-      {
-        MWARNING("Only updated " << updated->first << " account(s) (from " << self->remote_address() << ") out of " << self->accounts_.size() << ", resetting");
-        throw reset_state{};
-      }
+      if (!user_data::store(self->disk_, self->zclient_, epee::to_span(msg.blocks), epee::to_span(msg.users), nullptr, opts))
+        throw reset_state();
       return true;
     }
   } // anonymous
@@ -196,14 +196,12 @@ namespace lws { namespace rpc { namespace scanner
       {
         for (;;)
         {
-          next_ = std::make_shared<server_connection>(
-            self_->context_, self_->disk_.clone(), MONERO_UNWRAP(self_->zclient_.clone()), self_->webhook_verify_
-          );
+          next_ = std::make_shared<server_connection>(*self_);
           BOOST_ASIO_CORO_YIELD self_->acceptor_.async_accept(next_->sock_, *this);
 
           // delay enable_pull_accounts until async_accept completes
           MONERO_UNWRAP(next_->zclient_.enable_pull_accounts());
-          self_->scanners_.emplace(next_);
+          self_->remote_.emplace(next_);
           read_commands<server_connection>{std::move(next_)}();
         }
       }
@@ -232,15 +230,15 @@ namespace lws { namespace rpc { namespace scanner
     };
   }
 
-  server::server(const std::string& address, db::storage disk, rpc::client zclient, ssl_verification_t webhook_verify)
+  server::server(const std::string& address, std::string pass, db::storage disk, rpc::client zclient, ssl_verification_t webhook_verify)
     : context_(),
       acceptor_(context_),
-      scanners_(),
+      remote_(),
       disk_(std::move(disk)),
       zclient_(std::move(zclient)),
+      pass_(std::move(pass)),
       webhook_verify_(webhook_verify)
   {
-    
     const auto endpoint = get_endpoint(address); 
     acceptor_.open(endpoint.protocol());
     acceptor_.bind(endpoint);
@@ -249,8 +247,79 @@ namespace lws { namespace rpc { namespace scanner
     acceptor{*this}();
   }
 
-  server::~server()
+  server::~server() noexcept
   {}
+
+  bool server::replace_users()
+  { 
+    std::size_t total_threads = local_.size();
+    std::vector<std::shared_ptr<server_connection>> remotes;
+    remotes.reserve(remote_.size());
+    for (const auto& conn : remote_)
+    {
+      auto conn_shared = conn.lock();
+      if (conn_shared)
+      {
+        if (std::numeric_limits<std::size_t>::max() - total_threads < conn_shared->threads_)
+        {
+          MERROR("Exceeded max threads (size_t), cancelling new remote scanner initialization");
+          return false;
+        }
+
+        total_threads += conn_shared->threads_;
+        remotes.push_back(std::move(conn_shared));
+      }
+    }
+
+    std::vector<lws::account> users{};
+    auto reader = MONERO_UNWRAP(disk_.start_read());
+    auto active_users = MONERO_UNWRAP(reader.get_accounts(db::account_status::active));
+    auto total_users = active_users.count();
+    auto users_it = active_users.make_iterator();
+
+    for (std::size_t i = 0; !users_it.is_end() && i < local_.size(); ++i)
+    {
+      const auto this_users = std::max(std::size_t(1), total_users / total_threads);
+      users.reserve(this_users);
+
+      for (std::size_t j = 0; !users_it.is_end() && j < this_users; ++j, ++users_it)
+      {
+        users.push_back(
+          MONERO_UNWRAP(reader.get_full_account(users_it.get_value<db::account>()))
+        );
+      }
+
+      local_[i]->replace_accounts(std::move(users));
+      users.clear();
+      --total_threads;
+      total_users -= this_users;
+    }
+
+    active_users.reset();
+    users_it = active_users.make_iterator();
+
+    for (std::size_t i = 0; !users_it.is_end() && i < remotes.size(); ++i)
+    {
+      const auto this_threads = remotes[i]->threads_;
+      const auto this_users = std::max(std::size_t(1), total_users / (total_threads / this_threads));
+      users.reserve(this_users);
+
+      for (std::size_t j = 0; !users_it.is_end() && j < this_users; ++j, ++users_it)
+      {
+        users.push_back(
+          MONERO_UNWRAP(reader.get_full_account(users_it.get_value<db::account>()))
+        );
+      }
+
+      if (!write_command(remotes[i], replace_accounts{std::move(users)}))
+        return false;
+      users.clear();
+      total_threads -= this_threads;
+      total_users -= this_users;
+    }
+
+    return true;
+  }
 
   expect<void> server::poll_io()
   {
@@ -269,17 +338,20 @@ namespace lws { namespace rpc { namespace scanner
       return {error::signal_abort_scan};
     }
 
-    for (auto conn = scanners_.begin(); conn != scanners_.end(); )
+    bool replace = false;
+    for (auto conn = remote_.begin(); conn != remote_.end(); )
     {
       auto shared = conn->lock();
-      if (shared)
+      if (!shared)
       {
-        ++conn;
-        server_connection::pull_push(std::move(shared));
+        replace = true;
+        conn = remote_.erase(conn);
       }
       else
-        conn = scanners_.erase(conn);
+        ++conn;
     }
+    if (replace && !replace_users())
+      throw std::runtime_error{"Failed replace_users call"};
     return success();
   }
 }}} // lws // rpc // scanner

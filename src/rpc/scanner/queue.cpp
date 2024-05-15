@@ -24,42 +24,33 @@
 // INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#pragma once
 
-#include <boost/asio/io_service.hpp>
-#include <boost/asio/ip/tcp.hpp>
-#include <memory>
-#include <string>
+#include "queue.h"
 
-#include "rpc/scanner/queue.h"
-
-namespace lws { namespace rpc { namespace scanner
+namespace lws { namespace rpc { namespace scanner 
 {
-  struct client_connection;
-
-  //! \brief 
-  class client
+  std::size_t queue::user_count()
   {
-    friend class client_connection;
+    const boost::lock_guard<boost::mutex> lock{sync_};
+    return user_count_;
+  }
 
-    boost::asio::io_service context_;
-    std::shared_ptr<client_connection> conn_;
-    std::vector<std::shared_ptr<queue>> local_;
-    const boost::asio::ip::tcp::endpoint server_address_;
-    std::string pass_;
+  queue::status queue::get_accounts()
+  {
+    const boost::lock_guard<boost::mutex> lock{sync_};
+    queue::status out{
+     std::move(replace_), std::move(push_), user_count_
+    };
+    replace_.clear();
+    push_.clear();
+    return out; 
+  }
 
-  public:
-    //! Server `address` and list of `local` thread queues
-    explicit client(const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
-
-    client(const client&) = delete;
-    client(client&&) = delete;
-    ~client();
-    client& operator=(const client&) = delete;
-    client& operator=(client&&) = delete;
-
-    boost::asio::io_service& context() { return context_; }
-    const boost::asio::ip::tcp::endpoint& server_address() const { return server_address_; }
-    void reconnect();
-  };
-}}} // lws // rpc // scanner
+  void queue::replace_accounts(std::vector<lws::account> users)
+  {
+    const boost::lock_guard<boost::mutex> lock{sync_};
+    replace_ = std::move(users);
+    user_count_ = replace_.size();
+    push_.clear();
+  }
+}

@@ -63,7 +63,7 @@ namespace lws { namespace rpc { namespace scanner
       return write_status::failed;
     }
 
-    const header head{id, header::length_type{value_type(sink.size() - sizeof(header))}};
+    const header head{0, id, header::length_type{value_type(sink.size() - sizeof(header))}};
     std::memcpy(sink.data(), std::addressof(head), sizeof(head));
 
     const bool rc = self->write_bufs_.empty();

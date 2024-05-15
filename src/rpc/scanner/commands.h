@@ -45,30 +45,32 @@ namespace lws { namespace rpc { namespace scanner
   {
     using length_type = boost::endian::little_uint32_buf_t;
     header() = delete;
+    std::uint8_t version;
     std::uint8_t id;
     length_type length;
   };
-  static_assert(sizeof(header) == 5);
+  static_assert(sizeof(header) == 6);
 
 
   /*
    Client to server messages.
   */
- 
-  //! \brief Command for giving account(s) back to server.
-  struct give_accounts
+
+  //! \brief Inform server of info needed to spawn work to client.
+  struct initialize
   {
-    give_accounts() = delete;
+    initialize() = delete;
     static constexpr std::uint8_t id() noexcept { return 0; }
-    std::vector<db::account_id> users;
+    std::string pass;
+    std::uint32_t threads;
   };
-  WIRE_MSGPACK_DECLARE_OBJECT(give_accounts);
+  WIRE_MSGPACK_DECLARE_OBJECT(initialize);
 
   //! Command that updates database account records
   struct update_accounts
   {
     update_accounts() = delete;
-    static constexpr const std::uint8_t id() noexcept { return 1; }
+    static constexpr std::uint8_t id() noexcept { return 1; }
     std::vector<lws::account> users;
     std::vector<crypto::hash> blocks;
   };
@@ -78,22 +80,22 @@ namespace lws { namespace rpc { namespace scanner
   /*
    Server to client messages.
   */
-
-  //! \brief Command for pushing accounts to clients
+ 
+  //! \brief New accounts to add/push to scanning list
   struct push_accounts
   {
     push_accounts() = delete;
-    static constexpr const std::uint8_t id() noexcept { return 0; }
+    static constexpr std::uint8_t id() noexcept { return 0; }
     std::vector<lws::account> users;
   };
   WIRE_MSGPACK_DECLARE_OBJECT(push_accounts);
 
-  //! Command requesting `count` accounts be given up
-  struct take_accounts
+  //! \brief Replace account scanning list with this new one
+  struct replace_accounts
   {
-    take_accounts() = delete;
+    replace_accounts() = delete;
     static constexpr const std::uint8_t id() noexcept { return 1; }
-    std::size_t count;
+    std::vector<lws::account> users;
   };
-  WIRE_MSGPACK_DECLARE_OBJECT(take_accounts);
+  WIRE_MSGPACK_DECLARE_OBJECT(replace_accounts);
 }}} // lws // rpc // scanner

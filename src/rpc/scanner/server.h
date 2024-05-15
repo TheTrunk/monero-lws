@@ -35,6 +35,7 @@
 #include "db/storage.h"
 #include "net/net_ssl.h" // monero/contrib/epee/include
 #include "rpc/client.h"
+#include "rpc/scanner/queue.h"
 
 namespace lws { namespace rpc { namespace scanner
 {
@@ -48,24 +49,34 @@ namespace lws { namespace rpc { namespace scanner
       needed (basically a REST server on either end). */
   class server
   {
+    friend class server_connection;
+
     boost::asio::io_service context_;
     boost::asio::ip::tcp::acceptor acceptor_;
-    std::set<std::weak_ptr<server_connection>, std::owner_less<std::weak_ptr<server_connection>>> scanners_;
+    std::set<std::weak_ptr<server_connection>, std::owner_less<std::weak_ptr<server_connection>>> remote_;
+    std::vector<std::shared_ptr<queue>> local_;
     db::storage disk_;
     rpc::client zclient_;
-    ssl_verification_t webhook_verify_;
+    std::string pass_;
+    const ssl_verification_t webhook_verify_;
 
     //! Async acceptor routine
     struct acceptor;
 
+    //! Replace users/accounts on all local and remote threads
+    bool replace_users();
+
+    //! \return True if user/pass matches expected
+    bool check_pass(const std::string& user, const std::string& pass);
+
   public:
     static boost::asio::ip::tcp::endpoint get_endpoint(const std::string& address);
 
-    explicit server(const std::string& address, db::storage disk, rpc::client zclient, ssl_verification_t webhook_verify);
+    explicit server(const std::string& address, std::string pass, db::storage disk, rpc::client zclient, ssl_verification_t webhook_verify);
 
     server(const server&) = delete;
     server(server&&) = delete;
-    ~server();
+    ~server() noexcept;
     server& operator=(const server&) = delete;
     server& operator=(server&&) = delete;
 
