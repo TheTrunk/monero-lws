@@ -32,6 +32,9 @@
 #include <boost/numeric/conversion/cast.hpp>
 #include <chrono>
 
+#include "common/expect.h"      // monero/src
+#include "misc_log_ex.h"        // monero/contrib/epee/include
+#include "net/net_utils_base.h" // monero/contrib/epee/include
 #include "rpc/scanner/commands.h"
 #include "rpc/scanner/connection.h"
 #include "rpc/scanner/read_commands.h"
@@ -42,164 +45,201 @@ namespace lws { namespace rpc { namespace scanner
 {
   namespace
   {
-    constexpr const std::chrono::seconds reconnect_interval{30};
+    //! Connection completion timeout
+    constexpr const std::chrono::seconds connect_timeout{5};
+    
+    //! Retry connection timeout
+    constexpr const std::chrono::seconds reconnect_interval{10};
 
     struct push_accounts_handler
     {
       using input = push_accounts;
-      static bool handle(const std::shared_ptr<client_connection>& self, input msg); 
+      static bool handle(const std::shared_ptr<client>& self, input msg)
+      {
+        if (!self)
+          return false;
+        if (msg.users.empty())
+          return true;
+        client::push_accounts(self, std::move(msg.users));
+        return true;
+      }
     };
 
     struct replace_accounts_handler
     {
       using input = replace_accounts;
-      static bool handle(const std::shared_ptr<client_connection>& self, input msg); 
-    };
-
-    using command = bool(*)(const std::shared_ptr<client_connection>&);
-  }
-
-  struct client_connection : connection
-  {
-    rpc::scanner::client& parent_;
-    boost::asio::steady_timer reconnect_timer_;
-    std::size_t next_push_;
-
-    explicit client_connection(rpc::scanner::client& parent)
-      : connection(parent.context()),
-        parent_(parent),
-        reconnect_timer_(parent.context()),
-        next_push_(0)
-    {}
-
-    //! \return Handlers for commands from server
-    static const std::array<command, 2>& commands() noexcept
-    {
-      static constexpr const std::array<command, 2> value{{
-        call<push_accounts_handler, client_connection>,
-        call<replace_accounts_handler, client_connection>
-      }};
-      static_assert(push_accounts_handler::input::id() == 0);
-      static_assert(replace_accounts_handler::input::id() == 1);
-      return value;
-    }
-
-    const std::shared_ptr<client_connection>& conn() const noexcept { return parent_.conn_; }
-    const std::string& pass() const noexcept { return parent_.pass_; }
-    std::vector<std::shared_ptr<queue>>& local() noexcept
-    {
-      return parent_.local_;
-    } 
-
-    void cleanup()
-    {
-      base_cleanup();
-      parent_.reconnect();
-    }
-  };
-
-  namespace
-  {
-    bool push_accounts_handler::handle(const std::shared_ptr<client_connection>& self, input msg)
-    {
-      if (!self)
-        return false;
-
-      MINFO("Adding " << msg.users.size() << " new accounts to workload");
-
-      std::size_t iterations = 0;
-      for (std::size_t i = 0; !msg.users.empty() && i < self->local().size(); ++i, ++iterations)
+      static bool handle(const std::shared_ptr<client>& self, input msg)
       {
-        const auto count = std::max(std::size_t(1), msg.users.size() / (self->local().size() - i));
-        self->local()[(i + self->next_push_) % self->local().size()]->push_accounts(
-          std::make_move_iterator(msg.users.begin()), std::make_move_iterator(msg.users.begin() + count)
-        );
-        msg.users.erase(msg.users.begin(), msg.users.begin() + count);
-      }
-
-      self->next_push_ += iterations;
-      self->next_push_ %= self->local().size(); 
-      return true;
-    }
-
-    bool replace_accounts_handler::handle(const std::shared_ptr<client_connection>& self, input msg)
-    {
-      if (!self)
-        return false;
-
-      MINFO("Received " << msg.users.size() << " accounts as new workload");
-      for (std::size_t i = 0; !msg.users.empty() && i < self->local().size(); ++i)
-      {
-        const auto count = std::max(std::size_t(1), msg.users.size() / (self->local().size() - i));
-        std::vector<lws::account> thread_users{
-          std::make_move_iterator(msg.users.begin()),
-          std::make_move_iterator(msg.users.begin() + count)
-        };
-        msg.users.erase(msg.users.begin(), msg.users.begin() + count);
-        self->local()[i]->replace_accounts(std::move(thread_users));
-      }
-      self->next_push_ = 0;
-      return true;
-    }
-    
-    class connector : public boost::asio::coroutine
-    {
-      std::shared_ptr<client_connection> self_;
-    public:
-      explicit connector(std::shared_ptr<client_connection> self)
-        : boost::asio::coroutine(),
-          self_(std::move(self))
-      {}
-
-      void operator()(const boost::system::error_code& error = {})
-      {
-        if (!self_ || error == boost::asio::error::operation_aborted)
-          return; // exiting
-
-        BOOST_ASIO_CORO_REENTER(*this)
-        {
-          for (;;)
-          {
-            for (;;)
-            {
-              MINFO("Attempting connection to " << self_->remote_address());
-              BOOST_ASIO_CORO_YIELD self_->sock_.async_connect(self_->parent_.server_address(), *this);
-              if (error)
-                MERROR("Connection attempt failed: " << error.message());
-              else
-                break;
-
-              self_->reconnect_timer_.expires_from_now(reconnect_interval);
-              BOOST_ASIO_CORO_YIELD self_->reconnect_timer_.async_wait(*this);
-            }
-
-            MINFO("Connection made to " << self_->remote_address());
-            const auto threads = boost::numeric_cast<std::uint32_t>(self_->local().size());
-            if (write_command(self_->conn(), initialize{self_->pass(), threads}))
-              break;
-          }
-          read_commands<client_connection>{std::move(self_)};
-        }
+        if (!self)
+          return false;
+        // push empty accounts too, indicates we should stop scanning
+        client::replace_accounts(self, std::move(msg.users));
+        return true;
       }
     };
   } // anonymous
 
-  client::client(const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local)
-    : context_(),
-      conn_(nullptr),
-      local_(std::move(local)),
-      server_address_(rpc::scanner::server::get_endpoint(address)),
-      pass_(std::move(pass))
+  //! \brief Closes the socket, forcing all outstanding ops to cancel.
+  struct client::close
   {
-    reconnect();
+    std::shared_ptr<client> self_;
+
+    void operator()(const boost::system::error_code& error) const
+    {
+      if (self_ && error != boost::asio::error::operation_aborted)
+      {
+        assert(self_->strand_.running_in_this_thread());
+        self_->sock_.close();
+      }
+    }
+  };
+
+  //! \brief 
+  class client::connector : public boost::asio::coroutine
+  {
+    std::shared_ptr<client> self_;
+  public:
+    explicit connector(std::shared_ptr<client> self)
+      : boost::asio::coroutine(), self_(std::move(self))
+    {}
+
+    void operator()(const boost::system::error_code& error = {})
+    {
+      if (!self_ || error == boost::asio::error::operation_aborted)
+        return;
+
+      assert(self_->strand_.running_in_this_thread());
+      BOOST_ASIO_CORO_REENTER(*this)
+      {
+        for (;;)
+        {
+          MINFO("Attempting connection to " << self_->server_address_);
+          self_->connect_timer_.expires_from_now(connect_timeout);
+          self_->connect_timer_.async_wait(self_->strand_.wrap(close{self_}));
+
+          BOOST_ASIO_CORO_YIELD self_->sock_.async_connect(self_->server_address_, self_->strand_.wrap(*this));
+
+          if (!self_->connect_timer_.cancel() || error)
+            MERROR("Connection attempt failed: " << error.message());
+          else
+            break;
+
+          MINFO("Retrying connection in " << std::chrono::seconds{reconnect_interval}.count() << " seconds"); 
+          self_->connect_timer_.expires_from_now(reconnect_interval);
+          BOOST_ASIO_CORO_YIELD self_->connect_timer_.async_wait(self_->strand_.wrap(*this));
+        }
+
+        MINFO("Connection made to " << self_->server_address_);
+        self_->connected_ = true;
+        const auto threads = boost::numeric_cast<std::uint32_t>(self_->local_.size());
+        write_command(self_, initialize{self_->pass_, threads});
+        read_commands(self_);
+      }
+    }
+  };
+
+  client::client(boost::asio::io_service& context, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local)
+    : connection(context),
+      local_(std::move(local)),
+      pass_(std::move(pass)),
+      next_push_(0),
+      connect_timer_(context),
+      server_address_(rpc::scanner::server::get_endpoint(address)),
+      connected_(false)
+  {
+    for (const auto& queue : local_)
+    {
+      if (!queue)
+        MONERO_THROW(common_error::kInvalidArgument, "nullptr local queue");
+    }
   }
 
   client::~client()
   {}
 
-  void client::reconnect()
+  //! \return Handlers for commands from server
+  const std::array<client::command, 2>& client::commands() noexcept
   {
-    conn_ = std::make_shared<client_connection>(*this);
-    connector{conn_}();
-  } 
+    static constexpr const std::array<command, 2> value{{
+      call<push_accounts_handler, client>,
+      call<replace_accounts_handler, client>
+    }};
+    static_assert(push_accounts_handler::input::id() == 0);
+    static_assert(replace_accounts_handler::input::id() == 1);
+    return value;
+  }
+
+  void client::connect(const std::shared_ptr<client>& self)
+  {
+    if (!self)
+      MONERO_THROW(common_error::kInvalidArgument, "nullptr self");
+    self->strand_.dispatch([self] ()
+      {
+        if (!self->sock_.is_open())
+          connector{self}();
+      });
+  }
+
+  void client::push_accounts(const std::shared_ptr<client>& self, std::vector<lws::account> users)
+  {
+    if (!self)
+      MONERO_THROW(common_error::kInvalidArgument, "nullptr self");
+
+    self->strand_.dispatch([self, users = std::move(users)] () mutable
+      {
+        /* Keep this algorithm simple, one user at a time. A little more difficult
+          to do multiples at once */
+        MINFO("Adding " << users.size() << " new accounts to workload");
+        for (std::size_t i = 0; i < users.size(); ++i)
+        {
+          self->local_[self->next_push_++]->push_accounts(
+            std::make_move_iterator(users.begin() + i),
+            std::make_move_iterator(users.begin() + i + 1)
+          );
+          self->next_push_ %= self->local_.size();
+        }
+      });
+  }
+
+  void client::replace_accounts(const std::shared_ptr<client>& self, std::vector<lws::account> users)
+  {
+    if (!self)
+      MONERO_THROW(common_error::kInvalidArgument, "nullptr self");
+
+    self->strand_.dispatch([self, users = std::move(users)] () mutable
+      {
+        MINFO("Received " << users.size() << " accounts as new workload");
+        for (std::size_t i = 0; i < self->local_.size(); ++i)
+        {
+          // count == 0 is OK. This will tell the thread to stop working
+          const auto count = users.size() / (self->local_.size() - i);
+          std::vector<lws::account> next{
+            std::make_move_iterator(users.end() - count),
+            std::make_move_iterator(users.end())
+          };
+          users.erase(users.end() - count, users.end());
+          self->local_[i]->replace_accounts(std::move(next));
+        }
+        self->next_push_ = 0;
+      });
+  }
+
+  void client::send_update(const std::shared_ptr<client>& self, std::vector<lws::account> users, std::vector<crypto::hash> blocks)
+  {
+    if (!self)
+      MONERO_THROW(common_error::kInvalidArgument, "nullptr self");
+    
+    self->strand_.dispatch([self, users = std::move(users), blocks = std::move(blocks)] () mutable
+      {
+        if (!self->connected_)
+          MONERO_THROW(common_error::kInvalidArgument, "not connected");
+        write_command(self, update_accounts{std::move(users), std::move(blocks)});
+      });
+  }
+
+  void client::cleanup()
+  {
+    base_cleanup();
+    GET_IO_SERVICE(sock_).stop();
+  }
 }}} // lws // rpc // scanner

@@ -26,10 +26,12 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <atomic>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/steady_timer.hpp>
+#include <boost/asio/strand.hpp>
 #include <cstdint>
 #include <deque>
 #include <string>
@@ -40,7 +42,7 @@
 
 namespace lws { namespace rpc { namespace scanner
 {
-  //! \brief Base class for `client_connection` and `server_connection`.
+  //! \brief Base class for `client_connection` and `server_connection`. Always use `strand_`.
   struct connection
   {
     // Leave public for coroutines `read_commands` and `write_commands`
@@ -48,6 +50,7 @@ namespace lws { namespace rpc { namespace scanner
     std::deque<epee::byte_slice> write_bufs_;
     boost::asio::ip::tcp::socket sock_;
     boost::asio::steady_timer write_timeout_;
+    boost::asio::io_service::strand strand_;
     header next_;
     bool cleanup_;
 
@@ -56,6 +59,7 @@ namespace lws { namespace rpc { namespace scanner
         write_bufs_(),
         sock_(context),
         write_timeout_(context),
+        strand_(context),
         next_{},
         cleanup_(false)
     {}
@@ -64,17 +68,12 @@ namespace lws { namespace rpc { namespace scanner
     boost::asio::mutable_buffer read_buffer(const std::size_t size);
 
     //! \return ASIO compatible write buffer
-    boost::asio::const_buffer write_buffer() const
-    {
-      if (write_bufs_.empty())
-        return boost::asio::const_buffer(nullptr, 0);
-      return boost::asio::const_buffer(write_bufs_.front().data(), write_bufs_.front().size());
-    }
+    boost::asio::const_buffer write_buffer() const;
 
     //! \return `hostname:port`.
     std::string remote_address() const;
 
-    //! Cancels operations on socket and timer. Also updates `clean_up_ = true`.
+    //! Cancels operations on socket and timer. Also updates `cleanup_ = true`.
     void base_cleanup();
   };
 }}} // lws // rpc // scanner

@@ -34,8 +34,10 @@
 #include <type_traits>
 #include <vector>
 
+#include "byte_slice.h"   // monero/contrib/epee/include
 #include "byte_stream.h"  // monero/contrib/epee/include
 #include "commands.h"
+#include "common/expect.h"// monero/src
 #include "crypto/hash.h"  // monero/src
 #include "db/account.h"
 #include "misc_log_ex.h"
@@ -45,6 +47,8 @@
 
 namespace lws { namespace rpc { namespace scanner
 {
+  constexpr const std::size_t max_write_buffers = 100;
+
   /* \brief ASIO handler for write timeouts
 
     \tparam T concept requirements:
@@ -62,6 +66,7 @@ namespace lws { namespace rpc { namespace scanner
     {
       if (self_ && error != boost::asio::error::operation_aborted)
       {
+        assert(self_->strand_.running_in_this_thread());
         MERROR("Write timeout on socket (" << self_->remote_address() << ")");
         self_->cleanup();
       }
@@ -76,18 +81,21 @@ namespace lws { namespace rpc { namespace scanner
         does any other necessary work given that the socket connection is being
         terminated. */
   template<typename T>
-  class write_commands : public boost::asio::coroutine
+  class write_buffers : public boost::asio::coroutine
   {
     static_assert(std::is_base_of<connection, T>{});
     std::shared_ptr<T> self_;
   public:
-    explicit write_commands(std::shared_ptr<T> self)
+    explicit write_buffers(std::shared_ptr<T> self)
       : boost::asio::coroutine(), self_(std::move(self))
     {}
 
-    void operator()(const boost::system::error_code& error = {}, const std::size_t transferred = 0)
+    write_buffers(write_buffers&&) = default;
+    write_buffers(const write_buffers&) = default;
+
+    void operator()(const boost::system::error_code& error = {}, std::size_t = 0)
     {
-      if (error || !self_)
+      if (!self_ || error)
       {
         if (error != boost::asio::error::operation_aborted)
         {
@@ -99,6 +107,7 @@ namespace lws { namespace rpc { namespace scanner
         }
         return;
       }
+      assert(self_->strand_.running_in_this_thread());
       if (self_->cleanup_)
         return; // callback queued before cancellation
 
@@ -107,8 +116,8 @@ namespace lws { namespace rpc { namespace scanner
         while (!self_->write_bufs_.empty())
         {
           self_->write_timeout_.expires_from_now(std::chrono::seconds{10});
-          self_->write_timeout_.async_wait(timeout<T>{self_});
-          BOOST_ASIO_CORO_YIELD boost::asio::async_write(self_->sock_, self_->write_buffer(), *this);
+          self_->write_timeout_.async_wait(self_->strand_.wrap(timeout<T>{self_}));
+          BOOST_ASIO_CORO_YIELD boost::asio::async_write(self_->sock_, self_->write_buffer(), self_->strand_.wrap(*this));
           self_->write_timeout_.cancel();
           self_->write_bufs_.pop_front(); 
         }
@@ -116,16 +125,12 @@ namespace lws { namespace rpc { namespace scanner
     }
   };
 
-  enum class write_status
-  {
-    already_queued, failed, needs_queueing
-  };
+  //! \return Completed message using `sink` as source.
+  epee::byte_slice complete_command(std::uint8_t id, epee::byte_stream sink);
 
-  //! Completes writing command to `sink`, and queues for writing on `self`
-  write_status write_command(const std::shared_ptr<connection>& self, std::uint8_t id, epee::byte_stream sink);
 
   /*! Writes "raw" `header` then `data` as msgpack, and queues for writing to
-    `self`. Also starts ASIO async writing (via `write_commands`) if the queue
+    `self`. Also starts ASIO async writing (via `write_buffers`) if the queue
     was empty before queueing `data`.
 
     \tparam T must meet concept requirements for `T` outlined in
@@ -135,40 +140,68 @@ namespace lws { namespace rpc { namespace scanner
       * must have static function `id` which returns an `std::uint8_t` to
         identify the command on the remote side. */
   template<typename T, typename U>
-  bool write_command(std::shared_ptr<T> self, const U& data)
+  void write_command(const std::shared_ptr<T>& self, const U& data)
   {
     static_assert(std::is_base_of<connection, T>{});
     if (!self)
-      return false;
+      MONERO_THROW(common_error::kInvalidArgument, "nullptr self");
 
-    epee::byte_stream sink{};
-    sink.put_n(0, sizeof(header));
-
+    epee::byte_slice msg = nullptr;
+    try
     {
+      epee::byte_stream sink{};
+      sink.put_n(0, sizeof(header));
+
       // use integer keys for speed (default to_bytes uses strings)
       wire::msgpack_slice_writer dest{std::move(sink), true};
-      try
-      {
-        wire_write::bytes(dest, data);
-      }
-      catch (const wire::exception& e)
-      {
-        MERROR("Failed to serialize msgpack for remote (" << self->remote_address() << ") command: " << e.what());
-        return false;
-      }
-      sink = dest.take_sink();
+      wire_write::bytes(dest, data);
+
+      msg = complete_command(U::id(), dest.take_sink()); 
+    }
+    catch (const wire::exception& e)
+    {
+      MERROR("Failed to serialize msgpack for remote (" << self.get() << ") command: " << e.what());
+      throw; // this should rarely happen, so just shutdown
     }
 
-    switch (write_command(self, U::id(), std::move(sink)))
+    if (msg.empty())
     {
-    case write_status::already_queued:
-      break;
-    case write_status::failed:
-      return false;
-    case write_status::needs_queueing:
-      write_commands<T>{std::move(self)}();
-      break;
+      self->cleanup();
+      return;
     }
-    return true;
+
+    class queue_slice
+    {
+      std::shared_ptr<T> self_;
+      epee::byte_slice msg_;
+
+    public:
+      explicit queue_slice(std::shared_ptr<T> self, epee::byte_slice msg)
+        : self_(std::move(self)), msg_(std::move(msg))
+      {}
+
+      queue_slice(queue_slice&&) = default;
+      queue_slice(const queue_slice& rhs)
+        : self_(rhs.self_), msg_(rhs.msg_.clone())
+      {}
+
+      void operator()()
+      {
+        if (!self_)
+          return;
+
+        if (self_->write_bufs_.empty())
+          write_buffers{self_}();
+        else if (self_->write_bufs_.size() < max_write_buffers)
+          self_->write_bufs_.push_back(std::move(msg_));
+        else
+        {
+          MERROR("Exceeded max buffer size for connection: " << self_->remote_address());
+          self_->cleanup();
+        }
+      }
+    };
+
+    self->strand_.dispatch(queue_slice{self, std::move(msg)});
   }
 }}} // lws // rpc // scanner

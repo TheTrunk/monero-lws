@@ -28,29 +28,37 @@
 
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <cstddef>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "crypto/hash.h" // monero/src
+#include "db/fwd.h"
+#include "rpc/scanner/connection.h"
 #include "rpc/scanner/queue.h"
 
 namespace lws { namespace rpc { namespace scanner
 {
-  struct client_connection;
-
   //! \brief 
-  class client
+  class client : public connection
   {
-    friend class client_connection;
-
-    boost::asio::io_service context_;
-    std::shared_ptr<client_connection> conn_;
-    std::vector<std::shared_ptr<queue>> local_;
+    const std::vector<std::shared_ptr<queue>> local_;
+    const std::string pass_;
+    std::size_t next_push_;
+    boost::asio::steady_timer connect_timer_;
     const boost::asio::ip::tcp::endpoint server_address_;
-    std::string pass_;
+    bool connected_;
+
+    struct close;
+    class connector;
 
   public:
-    //! Server `address` and list of `local` thread queues
-    explicit client(const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
+    using command = bool(*)(const std::shared_ptr<client>&);
+
+    //! Does not start connection to `address`, see `connect`.
+    explicit client(boost::asio::io_context& context, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
 
     client(const client&) = delete;
     client(client&&) = delete;
@@ -58,8 +66,22 @@ namespace lws { namespace rpc { namespace scanner
     client& operator=(const client&) = delete;
     client& operator=(client&&) = delete;
 
-    boost::asio::io_service& context() { return context_; }
-    const boost::asio::ip::tcp::endpoint& server_address() const { return server_address_; }
-    void reconnect();
+    //! \return Handlers for client commands
+    static const std::array<command, 2>& commands() noexcept;
+
+    //! Start a connect loop on `self`.
+    static void connect(const std::shared_ptr<client>& self);
+
+    //! Push `users` to local queues. Synchronizes with latest connection.
+    static void push_accounts(const std::shared_ptr<client>& self, std::vector<lws::account> users);
+
+    //! Replace `users` on local queues. Synchronizes with latest connection.
+    static void replace_accounts(const std::shared_ptr<client>& self, std::vector<lws::account> users);
+
+    //! Send `users` upstream for disk storage
+    static void send_update(const std::shared_ptr<client>& self, std::vector<lws::account> users, std::vector<crypto::hash> blocks);
+
+    //! Closes socket and calls stop on `io_service`.
+    void cleanup();
   };
 }}} // lws // rpc // scanner

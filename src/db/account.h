@@ -134,6 +134,11 @@ namespace lws
     {
       return left.scan_height() < right.scan_height();
     }
+
+    bool operator()(db::account const& left, db::account const& right) const noexcept
+    {
+      return left.scan_height < right.scan_height;
+    }
   };
 
 } // lws

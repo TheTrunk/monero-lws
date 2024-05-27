@@ -45,7 +45,8 @@
 
 namespace lws { namespace rpc { namespace scanner
 {
-  /*! Function for binding to command callables.
+  /*! Function for binding to command callables. Must be exeucting "inside of"
+    connection strand.
 
     \tparam F concept requirements:
       * Must have inner `typedef` named `input` which specifies a type
@@ -61,6 +62,7 @@ namespace lws { namespace rpc { namespace scanner
     if (!self)
       return false;
 
+    assert(self->strand_.running_in_this_thread());
     typename F::input data{};
     const std::error_code error = 
       wire::msgpack::from_bytes(epee::byte_slice{std::move(self->read_buf_)}, data);
@@ -85,19 +87,19 @@ namespace lws { namespace rpc { namespace scanner
         of `bool(std::shared_ptr<T>)` callables. The position in the array
         determines the command number. */
   template<typename T>
-  class read_commands : public boost::asio::coroutine
+  class do_read_commands : public boost::asio::coroutine
   {
     static_assert(std::is_base_of<connection, T>{});
-    std::shared_ptr<T> self_;
+    const std::shared_ptr<T> self_;
   public:
-    explicit read_commands(std::shared_ptr<T> self)
+    explicit do_read_commands(std::shared_ptr<T> self)
       : boost::asio::coroutine(), self_(std::move(self))
     {}
 
     //! Invoke with no arguments to start read commands loop
     void operator()(const boost::system::error_code& error = {}, const std::size_t transferred = 0)
     {
-      if (error || !self_)
+      if (!self_ || error)
       {
         if (error != boost::asio::error::operation_aborted)
         {
@@ -112,16 +114,17 @@ namespace lws { namespace rpc { namespace scanner
       if (self_->cleanup_)
         return; // callback queued before cancellation
 
+      assert(self_->strand_.running_in_this_thread());
       BOOST_ASIO_CORO_REENTER(*this)
       {
         for (;;) // multiple commands
         {
           // indefinite read timeout (waiting for next command)
-          BOOST_ASIO_CORO_YIELD boost::asio::async_read(self_->sock_, self_->read_buffer(sizeof(self_->next_)), *this);
+          BOOST_ASIO_CORO_YIELD boost::asio::async_read(self_->sock_, self_->read_buffer(sizeof(self_->next_)), self_->strand_.wrap(*this));
 
           std::memcpy(std::addressof(self_->next_), self_->read_buf_.data(), sizeof(self_->next_));
           static_assert(std::numeric_limits<header::length_type::value_type>::max() <= std::numeric_limits<std::size_t>::max());
-          BOOST_ASIO_CORO_YIELD boost::asio::async_read(self_->sock_, self_->read_buffer(self_->next_.length.value()), *this);
+          BOOST_ASIO_CORO_YIELD boost::asio::async_read(self_->sock_, self_->read_buffer(self_->next_.length.value()), self_->strand_.wrap(*this));
 
           const auto& commands = T::commands();
           if (commands.size() <= self_->next_.id || !commands[self_->next_.id](self_))
@@ -133,4 +136,13 @@ namespace lws { namespace rpc { namespace scanner
       }
     }
   };
+
+  template<typename T>
+  bool read_commands(const std::shared_ptr<T>& self)
+  {
+    if (!self)
+      return false;
+    self->strand_.dispatch(do_read_commands{self});
+    return true;
+  }
 }}} // lws // rpc // scanner

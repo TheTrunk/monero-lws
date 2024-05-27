@@ -27,10 +27,10 @@
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 set(monero-lws-rpc-scanner_sources
-  client.cpp commands.cpp connection.cpp server.cpp write_commands.cpp
+  client.cpp commands.cpp connection.cpp queue.cpp server.cpp write_commands.cpp
 )
 set(monero-lws-rpc-scanner_headers
-  client.h commands.h connection.h fwd.h read_commands.h server.h write_commands.h
+  client.h commands.h connection.h fwd.h queue.h read_commands.h server.h write_commands.h
 )
 
 add_library(monero-lws-rpc-scanner ${monero-lws-rpc-scanner_sources} ${monero-lws-rpc-scanner_headers})

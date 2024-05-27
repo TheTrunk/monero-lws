@@ -30,44 +30,26 @@
 #include <cstring>
 #include <limits>
 
-#include "byte_slice.h" // monero/contrib/epee/include
-
-namespace
-{
-  constexpr const std::size_t max_write_commands = 1000;
-}
 
 namespace lws { namespace rpc { namespace scanner
-{ 
-  write_status write_command(const std::shared_ptr<connection>& self, const std::uint8_t id, epee::byte_stream sink)
-  {
-    if (!self)
-      return write_status::failed;
-
-    if (max_write_commands <= self->write_bufs_.size())
-    {
-      MERROR("Exceeded max write queue size for " << self->remote_address());
-      return write_status::failed;
-    }
-
+{
+  epee::byte_slice complete_command(const std::uint8_t id, epee::byte_stream sink)
+  {  
     if (sink.size() < sizeof(header))
     {
-      MERROR("Message sink was unexpectedly shrunk on message to " << self->remote_address());
-      return write_status::failed;
+      MERROR("Message sink was unexpectedly shrunk on message");
+      return nullptr;
     }
 
     using value_type = header::length_type::value_type;
     if (std::numeric_limits<value_type>::max() < sink.size() - sizeof(header))
     {
-      MERROR("Message to " << self->remote_address() << " exceeds max size");
-      return write_status::failed;
+      MERROR("Message to exceeds max size");
+      return nullptr;
     }
 
     const header head{0, id, header::length_type{value_type(sink.size() - sizeof(header))}};
     std::memcpy(sink.data(), std::addressof(head), sizeof(head));
-
-    const bool rc = self->write_bufs_.empty();
-    self->write_bufs_.push_back(epee::byte_slice{std::move(sink)});
-    return rc ? write_status::needs_queueing : write_status::already_queued;
+    return epee::byte_slice{std::move(sink)};
   }
 }}} // lws // rpc // scanner

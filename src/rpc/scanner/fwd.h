@@ -33,7 +33,8 @@ namespace lws { namespace rpc { namespace scanner
   struct give_accounts;
   struct header;
   struct push_accounts;
-  template<typename> struct read_commands;
+  class queue;
+  template<typename> struct do_read_commands;
   class server;
   struct take_accounts;
   struct update_accounts;

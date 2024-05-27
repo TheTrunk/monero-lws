@@ -35,6 +35,7 @@
 #include "db/storage.h"
 #include "net/net_ssl.h" // monero/contrib/epee/include
 #include "rpc/client.h"
+#include "rpc/scanner/fwd.h"
 #include "span.h"        // monero/contrib/epee/include
 
 namespace lws
@@ -84,14 +85,17 @@ namespace lws
     //! Callback for storing user account (typically local lmdb, but perhaps remote rpc)
     using store_func = std::function<bool(rpc::client&, epee::span<const crypto::hash>, epee::span<const lws::account>, epee::span<const db::pow_sync>, const scanner_options&)>;
 
-    //! Run _just_ the inner scanner loop. Calls `store` on account updates.
-    static void loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, const scanner_options& opts, bool leader_thread); 
+    /*! Run _just_ the inner scanner loop. Calls `store` on account updates.
+      \throw std::exception on hard errors (shutdown) conditions
+      \return True iff `queue` indicates thread now has zero accounts. False
+        indictes a soft, typically recoverable error. */
+    static bool loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, rpc::scanner::queue& queue, const scanner_options& opts, bool leader_thread); 
     
     //! Use `client` to sync blockchain data, and \return client if successful.
     static expect<rpc::client> sync(db::storage disk, rpc::client client, const bool untrusted_daemon = false);
 
     //! Poll daemon until `stop()` is called, using `thread_count` threads.
-    static void run(db::storage disk, rpc::context ctx, std::size_t thread_count, const scanner_options&);
+    static void run(db::storage disk, rpc::context ctx, std::size_t thread_count, const std::string& server_addr, std::string server_pass, const scanner_options&);
 
     //! \return True if `stop()` has never been called.
     static bool is_running() noexcept { return running; }

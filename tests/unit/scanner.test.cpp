@@ -284,6 +284,8 @@ namespace lws_test
 
 LWS_CASE("lws::scanner::sync and lws::scanner::run")
 {
+  mlog_set_log_level(4);
+
   cryptonote::account_keys keys{};
   crypto::generate_keys(keys.m_account_address.m_spend_public_key, keys.m_spend_secret_key);
   crypto::generate_keys(keys.m_account_address.m_view_public_key, keys.m_view_secret_key);
@@ -529,10 +531,9 @@ LWS_CASE("lws::scanner::sync and lws::scanner::run")
         static constexpr const lws::scanner_options opts{
           epee::net_utils::ssl_verification_t::none, true, false
         };
-
         boost::thread server_thread(&lws_test::rpc_thread, rpc.zmq_context(), std::cref(messages));
         const join on_scope_exit{server_thread};
-        lws::scanner::run(db.clone(), std::move(rpc), 1, opts);
+        lws::scanner::run(db.clone(), std::move(rpc), 1, {}, {}, opts);
       }
 
       hashes.push_back(cryptonote::get_block_hash(bmessage.blocks.back().block));

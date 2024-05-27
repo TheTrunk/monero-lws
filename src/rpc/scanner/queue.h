@@ -26,40 +26,54 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <boost/thread/condition_variable.hpp>
 #include <boost/thread/lock_guard.hpp>
 #include <boost/thread/mutex.hpp>
-#include <deque>
-#include <variant>
+#include <cstddef>
+#include <optional>
+#include <vector>
 
+#include "db/fwd.h"
 #include "rpc/scanner/commands.h"
 
 namespace lws { namespace rpc { namespace scanner
 {
+  //! Notifies worker thread of new accounts to scan. All functions thread-safe.
   class queue
   {
-    std::vector<lws::account> replace_;
-    std::vector<lws::account> push_;
-    std::size_t user_count_;
-    boost::mutex sync_;
-
   public:
-    //! Set of accounts to scan
+    //! Status of upstream scan requests.
     struct status
     {
-      std::vector<lws::account> replace;
+      std::optional<std::vector<lws::account>> replace; //!< Empty optional means replace **not** requested.
       std::vector<lws::account> push;
       std::size_t user_count;
     };
 
+  private:
+    std::optional<std::vector<lws::account>> replace_;
+    std::vector<lws::account> push_;
+    std::size_t user_count_;
+    boost::mutex sync_;
+    boost::condition_variable poll_;
+
+    status do_get_accounts();
+
+  public: 
     queue()
       : replace_(), push_(), user_count_(0), sync_()
     {}
+
+    ~queue(); 
 
     //! \return Total number of users given to this local thread
     std::size_t user_count();
 
     //! \return Replacement and "push" accounts
     status get_accounts();
+
+    //! Blocks until replace or push accounts become available OR scanner is stopped
+    status wait_for_accounts(std::atomic<bool>& stop);
 
     //! Replace existing accounts on thread with new `users`
     void replace_accounts(std::vector<lws::account> users);
@@ -68,9 +82,12 @@ namespace lws { namespace rpc { namespace scanner
     template<typename T>
     void push_accounts(T begin, T end)
     {
-      const boost::lock_guard<boost::mutex> lock{sync_};
-      user_count_ += (end - begin);
-      push_.insert(push_.end(), begin, end);
+      {
+        const boost::lock_guard<boost::mutex> lock{sync_};
+        user_count_ += (end - begin);
+        push_.insert(push_.end(), std::make_move_iterator(begin), std::make_move_iterator(end));
+      }
+      poll_.notify_all();
     }
   };
 }}} // lws // rpc // scanner

@@ -27,8 +27,25 @@
 
 #include "queue.h"
 
+#include "db/account.h"
+#include "scanner.h"
+
 namespace lws { namespace rpc { namespace scanner 
 {
+  queue::status queue::do_get_accounts()
+  {
+    status out{
+     std::move(replace_), std::move(push_), user_count_
+    };
+    replace_ = std::nullopt;
+    push_.clear();
+    push_.shrink_to_fit();
+    return out; 
+  }
+
+  queue::~queue()
+  {}
+
   std::size_t queue::user_count()
   {
     const boost::lock_guard<boost::mutex> lock{sync_};
@@ -38,19 +55,25 @@ namespace lws { namespace rpc { namespace scanner
   queue::status queue::get_accounts()
   {
     const boost::lock_guard<boost::mutex> lock{sync_};
-    queue::status out{
-     std::move(replace_), std::move(push_), user_count_
-    };
-    replace_.clear();
-    push_.clear();
-    return out; 
+    return do_get_accounts();
+  }
+
+  queue::status queue::wait_for_accounts(std::atomic<bool>& stop)
+  {
+    boost::unique_lock<boost::mutex> lock{sync_};
+    if (!replace_ && push_.empty())
+      poll_.wait(lock, [this, &stop] () { return replace_ || !push_.empty() || !stop; });
+    return do_get_accounts();
   }
 
   void queue::replace_accounts(std::vector<lws::account> users)
   {
-    const boost::lock_guard<boost::mutex> lock{sync_};
-    replace_ = std::move(users);
-    user_count_ = replace_.size();
-    push_.clear();
+    {
+      const boost::lock_guard<boost::mutex> lock{sync_};
+      replace_ = std::move(users);
+      user_count_ = replace_->size();
+      push_.clear();
+    }
+    poll_.notify_all();
   }
-}
+}}} // lws // rpc // scanner

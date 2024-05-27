@@ -33,23 +33,34 @@ namespace lws { namespace rpc { namespace scanner
 {
   boost::asio::mutable_buffer connection::read_buffer(const std::size_t size)
   {
+    assert(strand_.running_in_this_thread());
     read_buf_.clear();
     read_buf_.put_n(0, size);
     return boost::asio::mutable_buffer(read_buf_.data(), size);
   }
 
+  boost::asio::const_buffer connection::write_buffer() const
+  {
+    assert(strand_.running_in_this_thread());
+    if (write_bufs_.empty())
+      return boost::asio::const_buffer(nullptr, 0);
+    return boost::asio::const_buffer(write_bufs_.front().data(), write_bufs_.front().size());
+  }
+
   std::string connection::remote_address() const
   {
+    assert(strand_.running_in_this_thread());
     const auto endpoint = sock_.remote_endpoint();
     return endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
   }
 
   void connection::base_cleanup()
   {
+    assert(strand_.running_in_this_thread());
     if (!cleanup_)
-      MINFO("Disconnected from " << remote_address());
+      MINFO("Disconnected from " << remote_address() << " / " << this);
     cleanup_ = true;
-    sock_.cancel();
+    sock_.close();
     write_timeout_.cancel();
   }
 }}} // lws // rpc // scanner

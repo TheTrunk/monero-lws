@@ -25,12 +25,15 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include <boost/optional/optional.hpp>
+#include <boost/asio/signal_set.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <boost/program_options/parsers.hpp>
 #include <boost/program_options/variables_map.hpp>
 #include <boost/thread/thread.hpp>
+#include <csignal>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -43,7 +46,9 @@
 #include "db/storage.h"
 #include "error.h"
 #include "options.h"
+#include "misc_log_ex.h"         // monero/contrib/epee/include
 #include "rpc/scanner/client.h"
+#include "rpc/scanner/write_commands.h"
 #include "scanner.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
@@ -54,12 +59,13 @@ namespace
   struct options
   {
     const command_line::arg_descriptor<std::string> config_file;
-    const command_line::arg_descriptor<std::string> log_level;
+    const command_line::arg_descriptor<unsigned short> log_level;
     const command_line::arg_descriptor<std::string> lws_daemon;
     const command_line::arg_descriptor<std::string> lws_pass;
     const command_line::arg_descriptor<std::string> monerod_rpc;
+    const command_line::arg_descriptor<std::string> monerod_sub;
     const command_line::arg_descriptor<std::string> network;
-    const command_line::arg_descriptor<std::string> scan_threads;
+    const command_line::arg_descriptor<std::size_t> scan_threads;
 
     options()
       : config_file{"config-file", "Specify any option in a config file; <name>=<value> on separate lines"}
@@ -67,6 +73,7 @@ namespace
       , lws_daemon{"lws-daemon", "Specify monero-lws-daemon main process <tcp://[ip:]port>", ""}
       , lws_pass{"lws-pass", "Specify monero-lws-daemon password", ""}
       , monerod_rpc{"monerod-rpc", "Specify monero ZMQ RPC server <tcp://ip:port> or <ipc:///path>", ""}
+      , monerod_sub{"monerod-sub", "Specify monero ZMQ RPC server <tcp://ip:port> or <ipc:///path>", ""}
       , network{"network", "<\"main\"|\"stage\"|\"test\"> - Blockchain net type", "main"}
       , scan_threads{"scan-threads", "Number of scan threads", boost::thread::hardware_concurrency()}
     {}
@@ -78,6 +85,7 @@ namespace
       command_line::add_arg(description, lws_daemon);
       command_line::add_arg(description, lws_pass);
       command_line::add_arg(description, monerod_rpc);
+      command_line::add_arg(description, monerod_sub);
       command_line::add_arg(description, network);
       command_line::add_arg(description, command_line::arg_help);
     }
@@ -101,6 +109,7 @@ namespace
     std::string lws_daemon;
     std::string lws_pass;
     std::string monerod_rpc;
+    std::string monerod_sub;
     std::size_t scan_threads;    
   };
 
@@ -113,7 +122,7 @@ namespace
     out << description;
   }
 
-  boost::optional<program> get_program(int argc, char** argv)
+  std::optional<program> get_program(int argc, char** argv)
   {
     namespace po = boost::program_options;
 
@@ -144,7 +153,7 @@ namespace
     if (command_line::get_arg(args, command_line::arg_help))
     {
       print_help(std::cout);
-      return boost::none;
+      return std::nullopt;
     }
 
     opts.set_network(args); // do this first, sets global variable :/
@@ -154,27 +163,170 @@ namespace
       command_line::get_arg(args, opts.lws_daemon),
       command_line::get_arg(args, opts.lws_pass),
       command_line::get_arg(args, opts.monerod_rpc),
+      command_line::get_arg(args, opts.monerod_sub),
       command_line::get_arg(args, opts.scan_threads)
     };
     prog.scan_threads = std::max(std::size_t(1), prog.scan_threads);
     return prog;
   }
 
-  void run(program prog)
+  struct thread_data
   {
-    std::signal(SIGINT, [] (int) { lws::scanner::stop(); });
+    std::atomic<bool> stop;
+    boost::asio::io_service context; // last so its destructed first
+  };
 
-    auto ctx = lws::rpc::context::make(std::move(prog.monerod_rpc), std::move(prog.monerod_sub), {}, {}, std::chrono::minutes{0}, false);
+  struct send_users
+  {
+    std::shared_ptr<lws::rpc::scanner::client> client_;
 
-    MINFO("Using monerod ZMQ RPC at " << prog.monerod);
+    bool operator()(lws::rpc::client&, epee::span<const crypto::hash> chain, epee::span<const lws::account> users, epee::span<const lws::db::pow_sync> pow, const lws::scanner_options&)
+    {
+      if (!client_)
+        return false;
+      if (users.empty())
+        return true;
+      if (!pow.empty() || chain.empty())
+        return false;
 
-    rpc::scanner::client client{};
+      std::vector<crypto::hash> chain_copy{};
+      chain_copy.reserve(chain.size());
+      std::copy(chain.begin(), chain.end(), std::back_inserter(chain_copy));
 
-    // blocks until SIGINT
-    lws::scanner::run(std::move(disk), std::move(ctx), prog.scan_threads, webhook_verify, enable_subaddresses, prog.untrusted_daemon);
+      std::vector<lws::account> users_copy{};
+      users_copy.reserve(users.size());
+      for (const auto& user : users)
+        users_copy.push_back(user.clone());
+
+      lws::rpc::scanner::client::send_update(client_, std::move(users_copy), std::move(chain_copy));
+      return true;
+    }
+  };
+
+  void run_thread(thread_data& self, std::shared_ptr<lws::rpc::scanner::client> client, lws::rpc::client& zclient, std::shared_ptr<lws::rpc::scanner::queue> queue)
+  { 
+    try
+    {
+      struct stop_
+      {
+        thread_data& self;
+        ~stop_()
+        {
+          self.stop = true;
+          self.context.stop();
+        }
+      } stop{self};
+
+      if (!client || !queue)
+        return;
+
+      while (!self.stop && lws::scanner::is_running())
+      {
+        std::vector<lws::account> users{};
+        auto status = queue->wait_for_accounts(self.stop);
+        if (status.replace)
+          users = std::move(*status.replace);
+        users.insert(
+          users.end(),
+          std::make_move_iterator(status.push.begin()),
+          std::make_move_iterator(status.push.end())
+        );
+
+        if (!users.empty())
+        {
+          static constexpr const lws::scanner_options opts{
+            epee::net_utils::ssl_verification_t::system_ca, false, false
+          };
+
+          send_users send{client};
+          if (!lws::scanner::loop(self.stop, std::move(send), std::nullopt, MONERO_UNWRAP(zclient.clone()), std::move(users), *queue, opts, false))
+            return;
+        }
+      }
+    }
+    catch (const std::exception& e)
+    {
+      lws::scanner::stop();
+      MERROR(e.what());
+    }
+    catch (...)
+    {
+      lws::scanner::stop();
+      MERROR("Unknown error");
+    }
   }
 
+  void run(program prog)
+  {
+    MINFO("Using monerod ZMQ RPC at " << prog.monerod_rpc);
+    auto ctx = lws::rpc::context::make(std::move(prog.monerod_rpc), std::move(prog.monerod_sub), {}, {}, std::chrono::minutes{0}, false);
 
+    thread_data self{};
+
+    /*! \NOTE `ctx will need a strand or lock if multiple threads use
+      `self.context.run()` in the future. */
+
+    boost::asio::signal_set signals{self.context};
+    signals.add(SIGINT);
+    signals.async_wait([&self, &ctx] (const boost::system::error_code& error, int)
+    {
+      if (error != boost::asio::error::operation_aborted)
+      {
+        self.stop = true;
+        lws::scanner::stop();
+        ctx.raise_abort_scan();
+        self.context.stop();
+      }
+    });
+
+    while (lws::scanner::is_running())
+    {
+      std::vector<lws::rpc::client> zclients;
+      zclients.reserve(prog.scan_threads);
+
+      std::vector<std::shared_ptr<lws::rpc::scanner::queue>> queues{};
+      queues.resize(prog.scan_threads);
+
+      for (auto& queue : queues)
+      {
+        queue = std::make_shared<lws::rpc::scanner::queue>();
+        zclients.push_back(MONERO_UNWRAP(ctx.connect()));
+      }
+
+      auto client = std::make_shared<lws::rpc::scanner::client>(
+        self.context, prog.lws_daemon, prog.lws_pass, queues
+      );
+      lws::rpc::scanner::client::connect(client);
+
+      std::vector<boost::thread> threads{};
+      threads.reserve(prog.scan_threads);
+
+      struct stop_
+      {
+        thread_data& self;
+        std::vector<boost::thread>& threads;
+        lws::rpc::context& ctx;
+        ~stop_()
+        {
+          self.stop = true; 
+          ctx.raise_abort_scan();
+          for (auto& thread : threads)
+            thread.join();
+        }
+      } stop{self, threads, ctx};
+
+      boost::thread::attributes attrs;
+      attrs.set_stack_size(THREAD_STACK_SIZE);
+
+      self.stop = false;
+      for (std::size_t i = 0; i < prog.scan_threads; ++i)
+        threads.emplace_back(attrs, std::bind(&run_thread, std::ref(self), client, std::ref(zclients[i]), queues[i]));
+     
+      // block until SIGINT or exception
+      self.context.reset();
+      self.context.run();
+    } // while scanner running
+  }
 } // anonymous
 
 int main(int argc, char** argv)
@@ -183,7 +335,7 @@ int main(int argc, char** argv)
 
   try
   {
-    boost::optional<program> prog;
+    std::optional<program> prog;
 
     try
     {
