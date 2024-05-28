@@ -205,21 +205,21 @@ namespace
 
   void run_thread(thread_data& self, std::shared_ptr<lws::rpc::scanner::client> client, lws::rpc::client& zclient, std::shared_ptr<lws::rpc::scanner::queue> queue)
   { 
+    struct stop_
+    {
+      thread_data& self;
+      ~stop_()
+      {
+        self.stop = true;
+        self.io.stop();
+      }
+    } stop{self};
+
+    if (!client || !queue)
+      return;
+
     try
     {
-      struct stop_
-      {
-        thread_data& self;
-        ~stop_()
-        {
-          self.stop = true;
-          self.io.stop();
-        }
-      } stop{self};
-
-      if (!client || !queue)
-        return;
-
       while (!self.stop && lws::scanner::is_running())
       {
         std::vector<lws::account> users{};

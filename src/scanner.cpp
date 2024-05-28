@@ -599,6 +599,16 @@ namespace lws
 
     void do_scan_loop(thread_sync& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
     {
+      struct stop_
+      {
+        thread_sync& self;
+        ~stop_() noexcept
+        {
+          self.update = true;
+          self.io.stop();
+        }
+      } stop{self};
+
       // thread entry point, so wrap everything in `try { } catch (...) {}`
       try
       { 
@@ -611,16 +621,6 @@ namespace lws
         
         data.reset();
 
-        struct stop_
-        {
-          thread_sync& self;
-          ~stop_() noexcept
-          {
-            self.update = true;
-            self.io.stop();
-          }
-        } stop{self};
-
         if (!queue)
           return;
 
@@ -629,10 +629,11 @@ namespace lws
           if (!users.empty())
           {
             user_data store_local{disk.clone()};
-            if (!scanner::loop(self.update, std::move(store_local), std::move(disk), std::move(client), std::move(users), *queue, std::move(opts), leader_thread))
+            if (!scanner::loop(self.update, std::move(store_local), disk.clone(), MONERO_UNWRAP(client.clone()), std::move(users), *queue, opts, leader_thread))
               return;
           }
 
+          users.clear();
           auto status = queue->wait_for_accounts();
           if (status.replace)
             users = std::move(*status.replace);
