@@ -79,8 +79,7 @@ namespace lws { namespace rpc { namespace scanner
   public:
     static boost::asio::ip::tcp::endpoint get_endpoint(const std::string& address);
 
-    //! `context` lifetime must exceed `ctx`
-    explicit server(boost::asio::io_service& context, db::storage disk, rpc::client zclient, std::vector<std::shared_ptr<queue>> local, std::vector<db::account_id> active, ssl_verification_t webhook_verify);
+    explicit server(boost::asio::io_service& io, db::storage disk, rpc::client zclient, std::vector<std::shared_ptr<queue>> local, std::vector<db::account_id> active, ssl_verification_t webhook_verify);
 
     server(const server&) = delete;
     server(server&&) = delete;

@@ -138,12 +138,12 @@ namespace lws { namespace rpc { namespace scanner
     }
   };
 
-  client::client(boost::asio::io_service& context, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local)
-    : connection(context),
+  client::client(boost::asio::io_service& io, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local)
+    : connection(io),
       local_(std::move(local)),
       pass_(std::move(pass)),
       next_push_(0),
-      connect_timer_(context),
+      connect_timer_(io),
       server_address_(rpc::scanner::server::get_endpoint(address)),
       connected_(false)
   {

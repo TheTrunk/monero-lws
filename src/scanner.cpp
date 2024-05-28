@@ -97,7 +97,7 @@ namespace lws
     struct thread_sync
     {
       std::atomic<bool> update;
-      boost::asio::io_service context; //!< last to be destructed first
+      boost::asio::io_service io; //!< last to be destructed first
     };
     
     struct thread_data
@@ -617,7 +617,7 @@ namespace lws
           ~stop_() noexcept
           {
             self.update = true;
-            self.context.stop();
+            self.io.stop();
           }
         } stop{self};
 
@@ -633,7 +633,7 @@ namespace lws
               return;
           }
 
-          auto status = queue->wait_for_accounts(self.update);
+          auto status = queue->wait_for_accounts();
           if (status.replace)
             users = std::move(*status.replace);
           users.insert(
@@ -956,22 +956,31 @@ namespace lws
       assert(0 < users.size());
 
       std::vector<boost::thread> threads{};
+      threads.reserve(thread_count);
+
+      std::vector<std::shared_ptr<rpc::scanner::queue>> queues;
+      queues.resize(thread_count);
 
       struct join_
       {
         thread_sync& self;
         std::vector<boost::thread>& threads;
         rpc::context& ctx;
+        std::vector<std::shared_ptr<rpc::scanner::queue>>& queues;
 
         ~join_() noexcept
         {
           self.update = true;
           ctx.raise_abort_scan();
-          self.context.stop();
+          for (const auto& queue : queues)
+          {
+            if (queue)
+              queue->stop();
+          }
           for (auto& thread : threads)
             thread.join();
         }
-      } join{self, threads, ctx};
+      } join{self, threads, ctx, queues};
 
       /*
         The algorithm here is extremely basic. Users are divided evenly amongst
@@ -992,11 +1001,8 @@ namespace lws
       boost::thread::attributes attrs;
       attrs.set_stack_size(THREAD_STACK_SIZE);
 
-      threads.reserve(thread_count);
       std::sort(users.begin(), users.end(), by_height{});
 
-      std::vector<std::shared_ptr<rpc::scanner::queue>> queues;
-      queues.resize(thread_count);
       MINFO("Starting scan loops on " << thread_count << " thread(s) with " << users.size() << " account(s)");
 
       for (std::size_t i = 0; i < queues.size(); ++i)
@@ -1023,10 +1029,10 @@ namespace lws
 
       {
         auto server = std::make_shared<rpc::scanner::server>(
-          self.context,
+          self.io,
           disk.clone(),
           MONERO_UNWRAP(ctx.connect()),
-          std::move(queues),
+          queues,
           std::move(active),
           opts.webhook_verify
         );
@@ -1037,7 +1043,7 @@ namespace lws
       }
 
       // Blocks until sigint, local scanner issue, or exception
-      self.context.run();
+      self.io.run();
     }
 
     template<typename R, typename Q>
@@ -1304,7 +1310,7 @@ namespace lws
       \NOTE That `ctx` will need a strand or lock if multiple
         `io_service::run()` calls are used. */
 
-    boost::asio::signal_set signal{self.context};
+    boost::asio::signal_set signal{self.io};
     signal.add(SIGINT);
     signal.async_wait([&self, &ctx] (const boost::system::error_code& error, int)
       {
@@ -1313,11 +1319,11 @@ namespace lws
           self.update = true;
           scanner::stop();
           ctx.raise_abort_process();
-          self.context.stop();
+          self.io.stop();
         }
       });
 
-    boost::asio::steady_timer rate_timer{self.context};
+    boost::asio::steady_timer rate_timer{self.io};
     class rate_updater
     {
       boost::asio::steady_timer& rate_timer_;
@@ -1368,12 +1374,11 @@ namespace lws
       {
         MINFO("No active accounts");
 
-        boost::asio::steady_timer poll{self.context};
+        boost::asio::steady_timer poll{self.io};
         poll.expires_from_now(rpc::scanner::account_poll_interval);
         poll.async_wait([] (boost::system::error_code) {});
 
-        self.context.reset();
-        self.context.run_one();
+        self.io.run_one();
       }
       else
         check_loop(self, disk.clone(), ctx, thread_count, lws_server_addr, lws_server_pass, std::move(users), std::move(active), opts);

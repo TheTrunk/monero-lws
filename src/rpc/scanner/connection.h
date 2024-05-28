@@ -54,15 +54,8 @@ namespace lws { namespace rpc { namespace scanner
     header next_;
     bool cleanup_;
 
-    explicit connection(boost::asio::io_service& context)
-      : read_buf_(),
-        write_bufs_(),
-        sock_(context),
-        write_timeout_(context),
-        strand_(context),
-        next_{},
-        cleanup_(false)
-    {}
+    explicit connection(boost::asio::io_service& io);
+    ~connection();
 
     //! \return ASIO compatible read buffer of `size`.
     boost::asio::mutable_buffer read_buffer(const std::size_t size);

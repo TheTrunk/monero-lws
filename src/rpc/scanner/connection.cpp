@@ -31,6 +31,19 @@
 
 namespace lws { namespace rpc { namespace scanner
 {
+  connection::connection(boost::asio::io_service& io)
+    : read_buf_(),
+      write_bufs_(),
+      sock_(io),
+      write_timeout_(io),
+      strand_(io),
+      next_{},
+      cleanup_(false)
+  {}
+
+  connection::~connection()
+  {}
+
   boost::asio::mutable_buffer connection::read_buffer(const std::size_t size)
   {
     assert(strand_.running_in_this_thread());

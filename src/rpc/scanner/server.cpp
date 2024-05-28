@@ -76,8 +76,8 @@ namespace lws { namespace rpc { namespace scanner
     std::size_t threads_; //!< Number of scan threads at remote process
 
   public:
-    explicit server_connection(std::shared_ptr<server> parent, boost::asio::io_service& context)
-      : connection(context),
+    explicit server_connection(std::shared_ptr<server> parent, boost::asio::io_service& io)
+      : connection(io),
         parent_(std::move(parent)),
         threads_(0)
     {
@@ -419,10 +419,10 @@ namespace lws { namespace rpc { namespace scanner
     };
   }
 
-  server::server(boost::asio::io_service& context, db::storage disk, rpc::client zclient, std::vector<std::shared_ptr<queue>> local, std::vector<db::account_id> active, ssl_verification_t webhook_verify)
-    : strand_(context),
-      check_timer_(context),
-      acceptor_(context),
+  server::server(boost::asio::io_service& io, db::storage disk, rpc::client zclient, std::vector<std::shared_ptr<queue>> local, std::vector<db::account_id> active, ssl_verification_t webhook_verify)
+    : strand_(io),
+      check_timer_(io),
+      acceptor_(io),
       remote_(),
       local_(std::move(local)),
       active_(std::move(active)),

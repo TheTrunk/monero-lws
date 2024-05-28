@@ -173,7 +173,7 @@ namespace
   struct thread_data
   {
     std::atomic<bool> stop;
-    boost::asio::io_service context; // last so its destructed first
+    boost::asio::io_service io; // last so its destructed first
   };
 
   struct send_users
@@ -213,7 +213,7 @@ namespace
         ~stop_()
         {
           self.stop = true;
-          self.context.stop();
+          self.io.stop();
         }
       } stop{self};
 
@@ -223,7 +223,7 @@ namespace
       while (!self.stop && lws::scanner::is_running())
       {
         std::vector<lws::account> users{};
-        auto status = queue->wait_for_accounts(self.stop);
+        auto status = queue->wait_for_accounts();
         if (status.replace)
           users = std::move(*status.replace);
         users.insert(
@@ -264,9 +264,9 @@ namespace
     thread_data self{};
 
     /*! \NOTE `ctx will need a strand or lock if multiple threads use
-      `self.context.run()` in the future. */
+      `self.io.run()` in the future. */
 
-    boost::asio::signal_set signals{self.context};
+    boost::asio::signal_set signals{self.io};
     signals.add(SIGINT);
     signals.async_wait([&self, &ctx] (const boost::system::error_code& error, int)
     {
@@ -275,7 +275,7 @@ namespace
         self.stop = true;
         lws::scanner::stop();
         ctx.raise_abort_scan();
-        self.context.stop();
+        self.io.stop();
       }
     });
 
@@ -294,7 +294,7 @@ namespace
       }
 
       auto client = std::make_shared<lws::rpc::scanner::client>(
-        self.context, prog.lws_daemon, prog.lws_pass, queues
+        self.io, prog.lws_daemon, prog.lws_pass, queues
       );
       lws::rpc::scanner::client::connect(client);
 
@@ -306,14 +306,20 @@ namespace
         thread_data& self;
         std::vector<boost::thread>& threads;
         lws::rpc::context& ctx;
+        std::vector<std::shared_ptr<lws::rpc::scanner::queue>> queues;
         ~stop_()
         {
           self.stop = true; 
           ctx.raise_abort_scan();
+          for (const auto& queue : queues)
+          {
+            if (queue)
+              queue->stop();
+          }
           for (auto& thread : threads)
             thread.join();
         }
-      } stop{self, threads, ctx};
+      } stop{self, threads, ctx, queues};
 
       boost::thread::attributes attrs;
       attrs.set_stack_size(THREAD_STACK_SIZE);
@@ -323,8 +329,8 @@ namespace
         threads.emplace_back(attrs, std::bind(&run_thread, std::ref(self), client, std::ref(zclients[i]), queues[i]));
      
       // block until SIGINT or exception
-      self.context.reset();
-      self.context.run();
+      self.io.run();
+      self.io.reset();
     } // while scanner running
   }
 } // anonymous

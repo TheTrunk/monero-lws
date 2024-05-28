@@ -58,7 +58,7 @@ namespace lws { namespace rpc { namespace scanner
     using command = bool(*)(const std::shared_ptr<client>&);
 
     //! Does not start connection to `address`, see `connect`.
-    explicit client(boost::asio::io_context& context, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
+    explicit client(boost::asio::io_context& io, const std::string& address, std::string pass, std::vector<std::shared_ptr<queue>> local);
 
     client(const client&) = delete;
     client(client&&) = delete;

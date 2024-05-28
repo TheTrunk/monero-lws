@@ -43,8 +43,21 @@ namespace lws { namespace rpc { namespace scanner
     return out; 
   }
 
+  queue::queue()
+    : replace_(), push_(), user_count_(0), sync_(), poll_(), stop_(false)
+  {}
+
   queue::~queue()
   {}
+
+  void queue::stop()
+  {
+    {
+      const boost::lock_guard<boost::mutex> lock{sync_};
+      stop_ = true;
+    }
+    poll_.notify_all();
+  }
 
   std::size_t queue::user_count()
   {
@@ -58,11 +71,11 @@ namespace lws { namespace rpc { namespace scanner
     return do_get_accounts();
   }
 
-  queue::status queue::wait_for_accounts(std::atomic<bool>& stop)
+  queue::status queue::wait_for_accounts()
   {
     boost::unique_lock<boost::mutex> lock{sync_};
-    if (!replace_ && push_.empty())
-      poll_.wait(lock, [this, &stop] () { return replace_ || !push_.empty() || !stop; });
+    if (!replace_ && push_.empty() && !stop_)
+      poll_.wait(lock, [this] () { return replace_ || !push_.empty() || stop_; });
     return do_get_accounts();
   }
 

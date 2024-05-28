@@ -56,15 +56,16 @@ namespace lws { namespace rpc { namespace scanner
     std::size_t user_count_;
     boost::mutex sync_;
     boost::condition_variable poll_;
+    bool stop_;
 
     status do_get_accounts();
 
   public: 
-    queue()
-      : replace_(), push_(), user_count_(0), sync_()
-    {}
-
+    queue();
     ~queue(); 
+
+    //! `wait_for_accounts()` will return immediately, permanently.
+    void stop();
 
     //! \return Total number of users given to this local thread
     std::size_t user_count();
@@ -72,8 +73,8 @@ namespace lws { namespace rpc { namespace scanner
     //! \return Replacement and "push" accounts
     status get_accounts();
 
-    //! Blocks until replace or push accounts become available OR scanner is stopped
-    status wait_for_accounts(std::atomic<bool>& stop);
+    //! Blocks until replace or push accounts become available OR `stop()` is called. 
+    status wait_for_accounts();
 
     //! Replace existing accounts on thread with new `users`
     void replace_accounts(std::vector<lws::account> users);
