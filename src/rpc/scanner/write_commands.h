@@ -104,8 +104,9 @@ namespace lws { namespace rpc { namespace scanner
         if (error != boost::asio::error::operation_aborted)
         {
           MERROR("Write error on socket (" << self_->sock_.remote_endpoint() << "): " << error.message());
-            self_->cleanup();
+          self_->cleanup();
         }
+        self_->write_timeout_.cancel();
         return;
       }
       if (self_->cleanup_)
