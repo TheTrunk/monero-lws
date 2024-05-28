@@ -280,7 +280,7 @@ namespace
       MONERO_THROW(lws::error::configuration, "Remote scanning cannot be used with subaddresses or untrusted daemon");
 
     prog.rest_config.threads = std::max(std::size_t(1), prog.rest_config.threads);
-    if (!prog.lws_server_addr.empty())
+    if (prog.lws_server_addr.empty())
       prog.scan_threads = std::max(std::size_t(1), prog.scan_threads);
 
     if (command_line::is_arg_defaulted(args, opts.daemon_rpc))
@@ -295,13 +295,16 @@ namespace
     auto disk = lws::db::storage::open(prog.db_path.c_str(), prog.create_queue_max);
     auto ctx = lws::rpc::context::make(std::move(prog.daemon_rpc), std::move(prog.daemon_sub), std::move(prog.zmq_pub), std::move(prog.rmq), prog.rates_interval, prog.untrusted_daemon);
 
+    //! SIGINT handle registered by `scanner` constructor
+    lws::scanner scanner{disk.clone()};
+
     MINFO("Using monerod ZMQ RPC at " << ctx.daemon_address());
-    auto client = lws::scanner::sync(disk.clone(), ctx.connect().value(), prog.untrusted_daemon).value();
+    auto client = scanner.sync(ctx.connect().value(), prog.untrusted_daemon).value();
 
     const auto enable_subaddresses = bool(prog.rest_config.max_subaddresses);
     const auto webhook_verify = prog.rest_config.webhook_verify;
     lws::rest_server server{
-      epee::to_span(prog.rest_servers), prog.admin_rest_servers, disk.clone(), std::move(client), std::move(prog.rest_config)
+      epee::to_span(prog.rest_servers), prog.admin_rest_servers, std::move(disk), std::move(client), std::move(prog.rest_config)
     };
     for (const std::string& address : prog.rest_servers)
       MINFO("Listening for REST clients at " << address);
@@ -309,8 +312,7 @@ namespace
       MINFO("Listening for REST admin clients at " << address);
 
     // blocks until SIGINT
-    lws::scanner::run(
-      std::move(disk),
+    scanner.run(
       std::move(ctx),
       prog.scan_threads,
       std::move(prog.lws_server_addr),

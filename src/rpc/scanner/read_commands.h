@@ -69,7 +69,7 @@ namespace lws { namespace rpc { namespace scanner
     self->read_buf_.clear();
     if (error)
     {
-      MERROR("Failed to unpack message (from " << self->remote_address() << "): " << error.message());
+      MERROR("Failed to unpack message (from " << self->sock_.remote_endpoint() << "): " << error.message());
       return false;
     }
 
@@ -99,22 +99,22 @@ namespace lws { namespace rpc { namespace scanner
     //! Invoke with no arguments to start read commands loop
     void operator()(const boost::system::error_code& error = {}, const std::size_t transferred = 0)
     {
-      if (!self_ || error)
+      if (!self_)
+        return;
+
+      assert(self_->strand_.running_in_this_thread());
+      if (error)
       {
         if (error != boost::asio::error::operation_aborted)
         {
-          const std::string remote = self_ ?
-            self_->remote_address() : std::string{};
-          MERROR("Read error on socket (" << remote << "): " << error.message());
-          if (self_)
-            self_->cleanup();
+          MERROR("Read error on socket (" << self_->sock_.remote_endpoint() << "): " << error.message());
+          self_->cleanup();
         }
         return;
       }
       if (self_->cleanup_)
         return; // callback queued before cancellation
 
-      assert(self_->strand_.running_in_this_thread());
       BOOST_ASIO_CORO_REENTER(*this)
       {
         for (;;) // multiple commands

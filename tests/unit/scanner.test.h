@@ -27,6 +27,7 @@
 
 #include <vector>
 #include "byte_slice.h" // monero/contrib/epee/include
+#include "fwd.h"
 
 namespace lws_test
 {

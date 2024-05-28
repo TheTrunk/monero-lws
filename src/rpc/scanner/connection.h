@@ -63,9 +63,6 @@ namespace lws { namespace rpc { namespace scanner
     //! \return ASIO compatible write buffer
     boost::asio::const_buffer write_buffer() const;
 
-    //! \return `hostname:port`.
-    std::string remote_address() const;
-
     //! Cancels operations on socket and timer. Also updates `cleanup_ = true`.
     void base_cleanup();
   };

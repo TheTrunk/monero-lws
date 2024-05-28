@@ -27,6 +27,8 @@
 #pragma once
 
 #include <atomic>
+#include <boost/asio/io_service.hpp>
+#include <boost/asio/signal_set.hpp>
 #include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <string>
@@ -73,37 +75,61 @@ namespace lws
     bool operator()(rpc::client& zclient, epee::span<const crypto::hash> chain, epee::span<const lws::account> users, epee::span<const db::pow_sync> pow, const scanner_options&);
   };
 
+  struct scanner_data
+  {
+    boost::asio::io_service io_;
+    std::atomic<bool> stop_;     //!< Stop scanning but do not shutdown
+    std::atomic<bool> shutdown_; //!< Exit scanner::run
+
+    explicit scanner_data()
+      : io_(), stop_(false), shutdown_(false)
+    {}
+
+    bool is_running() const noexcept { return !stop_ && !shutdown_; }
+    bool has_shutdown() const noexcept { return shutdown_; }
+    void stop() { stop_ = true; io_.stop(); }
+    void shutdown() { shutdown_ = true; stop(); }
+  };
+
   //! Scans all active `db::account`s. Detects if another process changes active list.
   class scanner
   {
-    static std::atomic<bool> running;
-
-    scanner() = delete;
+    db::storage disk_;
+    scanner_data data_;
+    boost::asio::signal_set signals_; //!< Detect SIGINT requested shutdown
 
   public:
+
+    //! Register `SIGINT` handler and keep a copy of `disk`
+    explicit scanner(db::storage disk);
+    ~scanner();
 
     //! Callback for storing user account (typically local lmdb, but perhaps remote rpc)
     using store_func = std::function<bool(rpc::client&, epee::span<const crypto::hash>, epee::span<const lws::account>, epee::span<const db::pow_sync>, const scanner_options&)>;
 
-    /*! Run _just_ the inner scanner loop. Calls `store` on account updates.
+    /*! Run _just_ the inner scanner loop while `self.is_running() == true`.
+     *
       \throw std::exception on hard errors (shutdown) conditions
       \return True iff `queue` indicates thread now has zero accounts. False
-        indictes a soft, typically recoverable error. */
-    static bool loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, rpc::scanner::queue& queue, const scanner_options& opts, bool leader_thread); 
+        indicates a soft, typically recoverable error. */
+    static bool loop(const std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, rpc::scanner::queue& queue, const scanner_options& opts, bool leader_thread); 
     
     //! Use `client` to sync blockchain data, and \return client if successful.
-    static expect<rpc::client> sync(db::storage disk, rpc::client client, const bool untrusted_daemon = false);
+    expect<rpc::client> sync(rpc::client client, const bool untrusted_daemon = false);
 
-    //! Poll daemon until `stop()` is called, using `thread_count` threads.
-    static void run(db::storage disk, rpc::context ctx, std::size_t thread_count, const std::string& server_addr, std::string server_pass, const scanner_options&);
+    //! Poll daemon until `shutdown()` is called, using `thread_count` threads.
+    void run(rpc::context ctx, std::size_t thread_count, const std::string& server_addr, std::string server_pass, const scanner_options&);
 
-    //! \return True if `stop()` has never been called.
-    static bool is_running() noexcept { return running; }
+    //! \return True iff `stop()` and `shutdown()` has never been called
+    bool is_running() const noexcept { return data_.is_running(); }
 
-    //! Stops all scanner instances globally.
-    static void stop() noexcept { running = false; }
+    //! \return True if `shutdown()` has been been called.
+    bool has_shutdown() const noexcept { return data_.has_shutdown(); }
 
-    //! For testing, \post is_running() == true
-    static void reset() noexcept { running = true; }
+    //! Stop scan threads, but do not shutdown scanner.
+    void stop() { data_.stop(); }
+
+    // Stop scan threads AND shutdown scanner.
+    void shutdown() { data_.shutdown(); }
   };
 } // lws

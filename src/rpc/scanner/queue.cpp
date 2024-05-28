@@ -28,7 +28,6 @@
 #include "queue.h"
 
 #include "db/account.h"
-#include "scanner.h"
 
 namespace lws { namespace rpc { namespace scanner 
 {

@@ -60,18 +60,11 @@ namespace lws { namespace rpc { namespace scanner
     return boost::asio::const_buffer(write_bufs_.front().data(), write_bufs_.front().size());
   }
 
-  std::string connection::remote_address() const
-  {
-    assert(strand_.running_in_this_thread());
-    const auto endpoint = sock_.remote_endpoint();
-    return endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
-  }
-
   void connection::base_cleanup()
   {
     assert(strand_.running_in_this_thread());
     if (!cleanup_)
-      MINFO("Disconnected from " << remote_address() << " / " << this);
+      MINFO("Disconnected from " << sock_.remote_endpoint() << " / " << this);
     cleanup_ = true;
     sock_.close();
     write_timeout_.cancel();

@@ -120,7 +120,10 @@ namespace lws { namespace rpc { namespace scanner
           BOOST_ASIO_CORO_YIELD self_->sock_.async_connect(self_->server_address_, self_->strand_.wrap(*this));
 
           if (!self_->connect_timer_.cancel() || error)
+          {
             MERROR("Connection attempt failed: " << error.message());
+            self_->sock_.close();
+          }
           else
             break;
 

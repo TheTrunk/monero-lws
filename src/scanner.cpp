@@ -27,7 +27,6 @@
 #include "scanner.h"
 
 #include <algorithm>
-#include <boost/asio/signal_set.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/range/combine.hpp>
 #include <boost/thread/condition_variable.hpp>
@@ -75,8 +74,6 @@
 
 namespace lws
 {
-  std::atomic<bool> scanner::running{true};
-
   // Not in `rates.h` - defaulting to JSON output seems odd
   std::ostream& operator<<(std::ostream& out, lws::rates const& src)
   {
@@ -597,16 +594,12 @@ namespace lws
         MINFO("Updated exchange rates: " << *(*new_rates));
     }
 
-    void do_scan_loop(thread_sync& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
+    void do_scan_loop(scanner_data& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
     {
       struct stop_
       {
-        thread_sync& self;
-        ~stop_() noexcept
-        {
-          self.update = true;
-          self.io.stop();
-        }
+        scanner_data& self;
+        ~stop_() { self.stop(); }
       } stop{self};
 
       // thread entry point, so wrap everything in `try { } catch (...) {}`
@@ -624,12 +617,12 @@ namespace lws
         if (!queue)
           return;
 
-        while (!self.update && scanner::is_running())
+        while (self.is_running())
         {
           if (!users.empty())
           {
             user_data store_local{disk.clone()};
-            if (!scanner::loop(self.update, std::move(store_local), disk.clone(), MONERO_UNWRAP(client.clone()), std::move(users), *queue, opts, leader_thread))
+            if (!scanner::loop(self.stop_, std::move(store_local), disk.clone(), MONERO_UNWRAP(client.clone()), std::move(users), *queue, opts, leader_thread))
               return;
           }
 
@@ -646,18 +639,32 @@ namespace lws
       }
       catch (std::exception const& e)
       {
-        scanner::stop();
+        self.shutdown();
         MERROR(e.what());
       }
       catch (...)
       {
-        scanner::stop();
+        self.shutdown();
         MERROR("Unknown exception");
       }
     }
   } // anonymous
 
-    bool scanner::loop(std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, rpc::scanner::queue& queue, const scanner_options& opts, const bool leader_thread) 
+  scanner::scanner(db::storage disk)
+    : disk_(std::move(disk)), data_(), signals_(data_.io_)
+  {
+    signals_.add(SIGINT);
+    signals_.async_wait([this] (const boost::system::error_code& error, int)
+      {
+        if (error != boost::asio::error::operation_aborted)
+          shutdown(); 
+      });
+  }
+
+  scanner::~scanner()
+  {}
+
+    bool scanner::loop(const std::atomic<bool>& stop, store_func store, std::optional<db::storage> disk, rpc::client client, std::vector<lws::account> users, rpc::scanner::queue& queue, const scanner_options& opts, const bool leader_thread) 
     {
       if (users.empty())
         return true;
@@ -684,7 +691,7 @@ namespace lws
         if (opts.untrusted_daemon && disk)
           last_pow = MONERO_UNWRAP(MONERO_UNWRAP(disk->start_read()).get_last_pow_block()).id;
 
-        while (!stop && scanner::is_running())
+        while (!stop)
         {
           blockchain.clear();
           new_pow.clear();
@@ -871,7 +878,7 @@ namespace lws
                 pow_window.median_timestamps.erase(pow_window.median_timestamps.begin());
 
               // longhash takes a while, check is_running
-              if (!scanner::is_running())
+              if (stop)
                 return false;
 
               diff = cryptonote::next_difficulty(pow_window.pow_timestamps, pow_window.cumulative_diffs, get_target_time(db::block_id(fetched->start_height)));
@@ -951,10 +958,11 @@ namespace lws
       Launches `thread_count` threads to run `scan_loop`, and then polls for
       active account changes in background
     */
-    void check_loop(thread_sync& self, db::storage disk, rpc::context& ctx, const std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, std::vector<lws::account> users, std::vector<db::account_id> active, const scanner_options& opts)
+    void check_loop(scanner_data& self, db::storage disk, rpc::context& ctx, const std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, std::vector<lws::account> users, std::vector<db::account_id> active, const scanner_options& opts)
     {
-      assert(0 < thread_count);
-      assert(0 < users.size());
+      assert(users.size() == active.size());
+      assert(thread_count || !lws_server_addr.empty());
+      assert(!thread_count || !users.empty());
 
       std::vector<boost::thread> threads{};
       threads.reserve(thread_count);
@@ -964,15 +972,19 @@ namespace lws
 
       struct join_
       {
-        thread_sync& self;
-        std::vector<boost::thread>& threads;
+        scanner_data& self;
         rpc::context& ctx;
         std::vector<std::shared_ptr<rpc::scanner::queue>>& queues;
+        std::vector<boost::thread>& threads;
 
         ~join_() noexcept
         {
-          self.update = true;
-          ctx.raise_abort_scan();
+          self.stop();
+          if (self.has_shutdown())
+            ctx.raise_abort_process();
+          else
+            ctx.raise_abort_scan();
+
           for (const auto& queue : queues)
           {
             if (queue)
@@ -981,7 +993,7 @@ namespace lws
           for (auto& thread : threads)
             thread.join();
         }
-      } join{self, threads, ctx, queues};
+      } join{self, ctx, queues, threads};
 
       /*
         The algorithm here is extremely basic. Users are divided evenly amongst
@@ -997,7 +1009,7 @@ namespace lws
         transfers from the daemon, and the bottleneck on the writes into LMDB.
       */
 
-      self.update = false;
+      self.stop_ = false;
 
       boost::thread::attributes attrs;
       attrs.set_stack_size(THREAD_STACK_SIZE);
@@ -1026,11 +1038,12 @@ namespace lws
         threads.emplace_back(attrs, std::bind(&do_scan_loop, std::ref(self), std::move(data), i == 0));
       }
 
+      users.clear();
       users.shrink_to_fit();
 
       {
         auto server = std::make_shared<rpc::scanner::server>(
-          self.io,
+          self.io_,
           disk.clone(),
           MONERO_UNWRAP(ctx.connect()),
           queues,
@@ -1044,11 +1057,11 @@ namespace lws
       }
 
       // Blocks until sigint, local scanner issue, or exception
-      self.io.run();
+      self.io_.run();
     }
 
     template<typename R, typename Q>
-    expect<typename R::response> fetch_chain(rpc::client& client, const char* endpoint, const Q& req)
+    expect<typename R::response> fetch_chain(const scanner_data& self, rpc::client& client, const char* endpoint, const Q& req)
     {
       expect<void> sent{lws::error::daemon_timeout};
 
@@ -1057,7 +1070,7 @@ namespace lws
 
       while (!(sent = client.send(std::move(msg), std::chrono::seconds{1})))
       {
-        if (!scanner::is_running())
+        if (self.has_shutdown())
           return {lws::error::signal_abort_process};
 
         if (sync_rpc_timeout <= (std::chrono::steady_clock::now() - start))
@@ -1072,7 +1085,7 @@ namespace lws
 
       while (!(resp = client.get_message(std::chrono::seconds{1})))
       {
-        if (!scanner::is_running())
+        if (self.has_shutdown())
           return {lws::error::signal_abort_process};
 
         if (sync_rpc_timeout <= (std::chrono::steady_clock::now() - start))
@@ -1085,7 +1098,7 @@ namespace lws
     }
 
     // does not validate blockchain hashes
-    expect<rpc::client> sync_quick(db::storage disk, rpc::client client)
+    expect<rpc::client> sync_quick(const scanner_data& self, db::storage disk, rpc::client client)
     {
       MINFO("Starting blockchain sync with daemon");
 
@@ -1098,7 +1111,7 @@ namespace lws
         if (req.known_hashes.empty())
           return {lws::error::bad_blockchain};
 
-        auto resp = fetch_chain<rpc::get_hashes_fast>(client, "get_hashes_fast", req);
+        auto resp = fetch_chain<rpc::get_hashes_fast>(self, client, "get_hashes_fast", req);
         if (!resp)
           return resp.error();
 
@@ -1124,7 +1137,7 @@ namespace lws
     } 
  
     // validates blockchain hashes
-    expect<rpc::client> sync_full(db::storage disk, rpc::client client)
+    expect<rpc::client> sync_full(const scanner_data& self, db::storage disk, rpc::client client)
     {
       MINFO("Starting blockchain sync with daemon");
 
@@ -1140,7 +1153,7 @@ namespace lws
         if (req.block_ids.empty())
           return {lws::error::bad_blockchain};
 
-        auto resp = fetch_chain<rpc::get_blocks_fast>(client, "get_blocks_fast", req);
+        auto resp = fetch_chain<rpc::get_blocks_fast>(self, client, "get_blocks_fast", req);
         if (!resp)
           return resp.error();
 
@@ -1202,7 +1215,7 @@ namespace lws
             pow_window.median_timestamps.erase(pow_window.median_timestamps.begin());
 
           // longhash takes a while, check is_running
-          if (!scanner::is_running())
+          if (self.has_shutdown())
             return {error::signal_abort_process}; 
 
           diff = cryptonote::next_difficulty(pow_window.pow_timestamps, pow_window.cumulative_diffs, get_target_time(height));
@@ -1287,22 +1300,24 @@ namespace lws
     return store(disk_, client, chain, users, pow, opts);
   } 
 
-  expect<rpc::client> scanner::sync(db::storage disk, rpc::client client, const bool untrusted_daemon)
+  expect<rpc::client> scanner::sync(rpc::client client, const bool untrusted_daemon)
   {
+    if (has_shutdown())
+      MONERO_THROW(common_error::kInvalidArgument, "this has shutdown");
     if (untrusted_daemon)
-      return sync_full(std::move(disk), std::move(client));
-    return sync_quick(std::move(disk), std::move(client));
+      return sync_full(data_, disk_.clone(), std::move(client));
+    return sync_quick(data_, disk_.clone(), std::move(client));
   }
 
-  void scanner::run(db::storage disk, rpc::context ctx, std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, const scanner_options& opts)
+  void scanner::run(rpc::context ctx, std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, const scanner_options& opts)
   {
+    if (has_shutdown())
+      MONERO_THROW(common_error::kInvalidArgument, "this has shutdown");
     if (!lws_server_addr.empty() && (opts.enable_subaddresses || opts.untrusted_daemon))
       MONERO_THROW(error::configuration, "Cannot use remote scanner with subaddresses or untrusted daemon");
 
-    if (!lws_server_addr.empty())
+    if (lws_server_addr.empty())
       thread_count = std::max(std::size_t(1), thread_count);
-
-    thread_sync self{};
 
     /*! \NOTE Be careful about references and lifetimes of the callbacks. The
       ones below are safe because no `io_service::run()` call is after the
@@ -1311,20 +1326,7 @@ namespace lws
       \NOTE That `ctx` will need a strand or lock if multiple
         `io_service::run()` calls are used. */
 
-    boost::asio::signal_set signal{self.io};
-    signal.add(SIGINT);
-    signal.async_wait([&self, &ctx] (const boost::system::error_code& error, int)
-      {
-        if (error != boost::asio::error::operation_aborted)
-        {
-          self.update = true;
-          scanner::stop();
-          ctx.raise_abort_process();
-          self.io.stop();
-        }
-      });
-
-    boost::asio::steady_timer rate_timer{self.io};
+    boost::asio::steady_timer rate_timer{data_.io_};
     class rate_updater
     {
       boost::asio::steady_timer& rate_timer_;
@@ -1352,10 +1354,11 @@ namespace lws
       std::vector<db::account_id> active;
       std::vector<lws::account> users;
 
+      if (thread_count)
       {
         MINFO("Retrieving current active account list");
 
-        auto reader = MONERO_UNWRAP(disk.start_read());
+        auto reader = MONERO_UNWRAP(disk_.start_read());
         auto accounts = MONERO_UNWRAP(
           reader.get_accounts(db::account_status::active)
         );
@@ -1371,26 +1374,27 @@ namespace lws
         reader.finish_read();
       } // cleanup DB reader
 
-      if (users.empty())
+      if (thread_count && users.empty())
       {
         MINFO("No active accounts");
 
-        boost::asio::steady_timer poll{self.io};
+        boost::asio::steady_timer poll{data_.io_};
         poll.expires_from_now(rpc::scanner::account_poll_interval);
         poll.async_wait([] (boost::system::error_code) {});
 
-        self.io.run_one();
+        data_.io_.run_one();
       }
       else
-        check_loop(self, disk.clone(), ctx, thread_count, lws_server_addr, lws_server_pass, std::move(users), std::move(active), opts);
+        check_loop(data_, disk_.clone(), ctx, thread_count, lws_server_addr, lws_server_pass, std::move(users), std::move(active), opts);
 
-      if (!scanner::is_running())
+      data_.io_.reset();
+      if (has_shutdown())
         return;
 
       if (!client)
         client = MONERO_UNWRAP(ctx.connect());
 
-      expect<rpc::client> synced = sync(disk.clone(), std::move(client), opts.untrusted_daemon);
+      expect<rpc::client> synced = sync(std::move(client), opts.untrusted_daemon);
       if (!synced)
       {
         if (!synced.matches(std::errc::timed_out))

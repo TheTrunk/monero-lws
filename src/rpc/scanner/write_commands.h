@@ -67,7 +67,7 @@ namespace lws { namespace rpc { namespace scanner
       if (self_ && error != boost::asio::error::operation_aborted)
       {
         assert(self_->strand_.running_in_this_thread());
-        MERROR("Write timeout on socket (" << self_->remote_address() << ")");
+        MERROR("Write timeout on socket (" << self_->sock_.remote_endpoint() << ")");
         self_->cleanup();
       }
     }
@@ -95,19 +95,19 @@ namespace lws { namespace rpc { namespace scanner
 
     void operator()(const boost::system::error_code& error = {}, std::size_t = 0)
     {
-      if (!self_ || error)
+      if (!self_)
+        return;
+
+      assert(self_->strand_.running_in_this_thread());
+      if (error)
       {
         if (error != boost::asio::error::operation_aborted)
         {
-          const std::string remote = self_ ?
-            self_->remote_address() : std::string{};
-          MERROR("Write error on socket (" << remote << "): " << error.message());
-          if (self_)
+          MERROR("Write error on socket (" << self_->sock_.remote_endpoint() << "): " << error.message());
             self_->cleanup();
         }
         return;
       }
-      assert(self_->strand_.running_in_this_thread());
       if (self_->cleanup_)
         return; // callback queued before cancellation
 
@@ -190,13 +190,14 @@ namespace lws { namespace rpc { namespace scanner
         if (!self_)
           return;
 
-        if (self_->write_bufs_.empty())
+        const bool queue = self_->write_bufs_.empty();
+        self_->write_bufs_.push_back(std::move(msg_));
+
+        if (queue)
           write_buffers{self_}();
-        else if (self_->write_bufs_.size() < max_write_buffers)
-          self_->write_bufs_.push_back(std::move(msg_));
-        else
+        else if (max_write_buffers <= self_->write_bufs_.size())
         {
-          MERROR("Exceeded max buffer size for connection: " << self_->remote_address());
+          MERROR("Exceeded max buffer size for connection: " << self_->sock_.remote_endpoint());
           self_->cleanup();
         }
       }
