@@ -1344,9 +1344,16 @@ namespace lws
         rate_timer_.expires_from_now(rate_interval_);
         rate_timer_.async_wait(*this);
       }
+
+      std::chrono::minutes rate_interval() const noexcept { return rate_interval_; }
     };
 
-    rate_updater{rate_timer, ctx}();
+    {
+      rate_updater updater{rate_timer, ctx};
+      if (std::chrono::minutes{0} < updater.rate_interval())
+        updater();
+    }
+
     rpc::client client{};
 
     for (;;)
