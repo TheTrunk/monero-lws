@@ -290,6 +290,9 @@ namespace
 
     for (;;)
     {
+      if (self.stop_ && self.is_running())
+        boost::this_thread::sleep_for(boost::chrono::seconds{1});
+
       self.stop_ = false;
       self.io_.reset();
       if (self.has_shutdown())
