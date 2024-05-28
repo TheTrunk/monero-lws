@@ -75,13 +75,13 @@ namespace lws
     bool operator()(rpc::client& zclient, epee::span<const crypto::hash> chain, epee::span<const lws::account> users, epee::span<const db::pow_sync> pow, const scanner_options&);
   };
 
-  struct scanner_data
+  struct scanner_sync
   {
     boost::asio::io_service io_;
     std::atomic<bool> stop_;     //!< Stop scanning but do not shutdown
     std::atomic<bool> shutdown_; //!< Exit scanner::run
 
-    explicit scanner_data()
+    explicit scanner_sync()
       : io_(), stop_(false), shutdown_(false)
     {}
 
@@ -95,7 +95,7 @@ namespace lws
   class scanner
   {
     db::storage disk_;
-    scanner_data data_;
+    scanner_sync sync_;
     boost::asio::signal_set signals_; //!< Detect SIGINT requested shutdown
 
   public:
@@ -121,15 +121,15 @@ namespace lws
     void run(rpc::context ctx, std::size_t thread_count, const std::string& server_addr, std::string server_pass, const scanner_options&);
 
     //! \return True iff `stop()` and `shutdown()` has never been called
-    bool is_running() const noexcept { return data_.is_running(); }
+    bool is_running() const noexcept { return sync_.is_running(); }
 
     //! \return True if `shutdown()` has been been called.
-    bool has_shutdown() const noexcept { return data_.has_shutdown(); }
+    bool has_shutdown() const noexcept { return sync_.has_shutdown(); }
 
     //! Stop scan threads, but do not shutdown scanner.
-    void stop() { data_.stop(); }
+    void stop() { sync_.stop(); }
 
     // Stop scan threads AND shutdown scanner.
-    void shutdown() { data_.shutdown(); }
+    void shutdown() { sync_.shutdown(); }
   };
 } // lws

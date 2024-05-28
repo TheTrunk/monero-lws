@@ -219,11 +219,11 @@ namespace
     }
   };
 
-  void run_thread(lws::scanner_data& self, std::shared_ptr<lws::rpc::scanner::client> client, lws::rpc::client& zclient, std::shared_ptr<lws::rpc::scanner::queue> queue)
+  void run_thread(lws::scanner_sync& self, std::shared_ptr<lws::rpc::scanner::client> client, lws::rpc::client& zclient, std::shared_ptr<lws::rpc::scanner::queue> queue)
   {
     struct stop_
     {
-      lws::scanner_data& self;
+      lws::scanner_sync& self;
       ~stop_() { self.stop(); }
     } stop{self};
 
@@ -275,7 +275,7 @@ namespace
     MINFO("Using monerod ZMQ RPC at " << prog.monerod_rpc);
     auto ctx = lws::rpc::context::make(std::move(prog.monerod_rpc), std::move(prog.monerod_sub), {}, {}, std::chrono::minutes{0}, false);
 
-    lws::scanner_data self{};
+    lws::scanner_sync self{};
 
     /*! \NOTE `ctx will need a strand or lock if multiple threads use
       `self.io.run()` in the future. */
@@ -320,7 +320,7 @@ namespace
 
       struct stop_
       {
-        lws::scanner_data& self;
+        lws::scanner_sync& self;
         lws::rpc::context& ctx;
         std::vector<std::shared_ptr<lws::rpc::scanner::queue>> queues;
         std::vector<boost::thread>& threads;

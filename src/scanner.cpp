@@ -91,12 +91,6 @@ namespace lws
     constexpr const std::chrono::seconds send_timeout{30};
     constexpr const std::chrono::seconds sync_rpc_timeout{30};
 
-    struct thread_sync
-    {
-      std::atomic<bool> update;
-      boost::asio::io_service io; //!< last to be destructed first
-    };
-    
     struct thread_data
     {
       explicit thread_data(rpc::client client, db::storage disk, std::vector<lws::account> users, std::shared_ptr<rpc::scanner::queue> queue, scanner_options opts)
@@ -594,11 +588,11 @@ namespace lws
         MINFO("Updated exchange rates: " << *(*new_rates));
     }
 
-    void do_scan_loop(scanner_data& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
+    void do_scan_loop(scanner_sync& self, std::shared_ptr<thread_data> data, const bool leader_thread) noexcept
     {
       struct stop_
       {
-        scanner_data& self;
+        scanner_sync& self;
         ~stop_() { self.stop(); }
       } stop{self};
 
@@ -651,7 +645,7 @@ namespace lws
   } // anonymous
 
   scanner::scanner(db::storage disk)
-    : disk_(std::move(disk)), data_(), signals_(data_.io_)
+    : disk_(std::move(disk)), sync_(), signals_(sync_.io_)
   {
     signals_.add(SIGINT);
     signals_.async_wait([this] (const boost::system::error_code& error, int)
@@ -958,7 +952,7 @@ namespace lws
       Launches `thread_count` threads to run `scan_loop`, and then polls for
       active account changes in background
     */
-    void check_loop(scanner_data& self, db::storage disk, rpc::context& ctx, const std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, std::vector<lws::account> users, std::vector<db::account_id> active, const scanner_options& opts)
+    void check_loop(scanner_sync& self, db::storage disk, rpc::context& ctx, const std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, std::vector<lws::account> users, std::vector<db::account_id> active, const scanner_options& opts)
     {
       assert(users.size() == active.size());
       assert(thread_count || !lws_server_addr.empty());
@@ -972,7 +966,7 @@ namespace lws
 
       struct join_
       {
-        scanner_data& self;
+        scanner_sync& self;
         rpc::context& ctx;
         std::vector<std::shared_ptr<rpc::scanner::queue>>& queues;
         std::vector<boost::thread>& threads;
@@ -1061,7 +1055,7 @@ namespace lws
     }
 
     template<typename R, typename Q>
-    expect<typename R::response> fetch_chain(const scanner_data& self, rpc::client& client, const char* endpoint, const Q& req)
+    expect<typename R::response> fetch_chain(const scanner_sync& self, rpc::client& client, const char* endpoint, const Q& req)
     {
       expect<void> sent{lws::error::daemon_timeout};
 
@@ -1098,7 +1092,7 @@ namespace lws
     }
 
     // does not validate blockchain hashes
-    expect<rpc::client> sync_quick(const scanner_data& self, db::storage disk, rpc::client client)
+    expect<rpc::client> sync_quick(const scanner_sync& self, db::storage disk, rpc::client client)
     {
       MINFO("Starting blockchain sync with daemon");
 
@@ -1137,7 +1131,7 @@ namespace lws
     } 
  
     // validates blockchain hashes
-    expect<rpc::client> sync_full(const scanner_data& self, db::storage disk, rpc::client client)
+    expect<rpc::client> sync_full(const scanner_sync& self, db::storage disk, rpc::client client)
     {
       MINFO("Starting blockchain sync with daemon");
 
@@ -1305,8 +1299,8 @@ namespace lws
     if (has_shutdown())
       MONERO_THROW(common_error::kInvalidArgument, "this has shutdown");
     if (untrusted_daemon)
-      return sync_full(data_, disk_.clone(), std::move(client));
-    return sync_quick(data_, disk_.clone(), std::move(client));
+      return sync_full(sync_, disk_.clone(), std::move(client));
+    return sync_quick(sync_, disk_.clone(), std::move(client));
   }
 
   void scanner::run(rpc::context ctx, std::size_t thread_count, const std::string& lws_server_addr, std::string lws_server_pass, const scanner_options& opts)
@@ -1326,7 +1320,7 @@ namespace lws
       \NOTE That `ctx` will need a strand or lock if multiple
         `io_service::run()` calls are used. */
 
-    boost::asio::steady_timer rate_timer{data_.io_};
+    boost::asio::steady_timer rate_timer{sync_.io_};
     class rate_updater
     {
       boost::asio::steady_timer& rate_timer_;
@@ -1385,16 +1379,16 @@ namespace lws
       {
         MINFO("No active accounts");
 
-        boost::asio::steady_timer poll{data_.io_};
+        boost::asio::steady_timer poll{sync_.io_};
         poll.expires_from_now(rpc::scanner::account_poll_interval);
         poll.async_wait([] (boost::system::error_code) {});
 
-        data_.io_.run_one();
+        sync_.io_.run_one();
       }
       else
-        check_loop(data_, disk_.clone(), ctx, thread_count, lws_server_addr, lws_server_pass, std::move(users), std::move(active), opts);
+        check_loop(sync_, disk_.clone(), ctx, thread_count, lws_server_addr, lws_server_pass, std::move(users), std::move(active), opts);
 
-      data_.io_.reset();
+      sync_.io_.reset();
       if (has_shutdown())
         return;
 
