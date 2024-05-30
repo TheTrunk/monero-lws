@@ -615,8 +615,10 @@ namespace lws
         {
           if (!users.empty())
           {
+            auto new_client = MONERO_UNWRAP(client.clone());
+            MONERO_UNWRAP(new_client.watch_scan_signals());
             user_data store_local{disk.clone()};
-            if (!scanner::loop(self.stop_, std::move(store_local), disk.clone(), MONERO_UNWRAP(client.clone()), std::move(users), *queue, opts, leader_thread))
+            if (!scanner::loop(self.stop_, std::move(store_local), disk.clone(), std::move(new_client), std::move(users), *queue, opts, leader_thread))
               return;
           }
 
@@ -1023,11 +1025,8 @@ namespace lws
         };
         users.erase(users.end() - count, users.end());
 
-        rpc::client client = MONERO_UNWRAP(ctx.connect());
-        MONERO_UNWRAP(client.watch_scan_signals());
-
         auto data = std::make_shared<thread_data>(
-          std::move(client), disk.clone(), std::move(thread_users), queues[i], opts
+          MONERO_UNWRAP(ctx.connect()), disk.clone(), std::move(thread_users), queues[i], opts
         );
         threads.emplace_back(attrs, std::bind(&do_scan_loop, std::ref(self), std::move(data), i == 0));
       }
