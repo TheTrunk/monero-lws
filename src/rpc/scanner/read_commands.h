@@ -69,7 +69,7 @@ namespace lws { namespace rpc { namespace scanner
     self->read_buf_.clear();
     if (error)
     {
-      MERROR("Failed to unpack message (from " << self->sock_.remote_endpoint() << "): " << error.message());
+      MERROR("Failed to unpack message (from " << self->remote_endpoint() << "): " << error.message());
       return false;
     }
 
@@ -107,7 +107,7 @@ namespace lws { namespace rpc { namespace scanner
       {
         if (error != boost::asio::error::operation_aborted)
         {
-          MERROR("Read error on socket (" << self_->sock_.remote_endpoint() << "): " << error.message());
+          MERROR("Read error on socket (" << self_->remote_endpoint() << "): " << error.message());
           self_->cleanup();
         }
         return;

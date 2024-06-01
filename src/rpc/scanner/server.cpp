@@ -115,19 +115,19 @@ namespace lws { namespace rpc { namespace scanner
       assert(self->strand_.running_in_this_thread());
       if (self->threads_)
       {
-        MERROR("Client ( " << self->sock_.remote_endpoint() << ") invoked initialize twice, closing connection");
+        MERROR("Client ( " << self->remote_endpoint() << ") invoked initialize twice, closing connection");
         return false;
       }
 
       if (!msg.threads)
       {
-        MERROR("Client (" << self->sock_.remote_endpoint() << ") intialized with 0 threads");
+        MERROR("Client (" << self->remote_endpoint() << ") intialized with 0 threads");
         return false;
       }
 
       if (!self->parent_->check_pass(msg.pass))
       {
-        MERROR("Client (" << self->sock_.remote_endpoint() << ") provided invalid pass");
+        MERROR("Client (" << self->remote_endpoint() << ") provided invalid pass");
         return false;
       }
 
@@ -175,7 +175,7 @@ namespace lws { namespace rpc { namespace scanner
           next_ = std::make_shared<server_connection>(self_, GET_IO_SERVICE(self_->check_timer_));
           BOOST_ASIO_CORO_YIELD self_->acceptor_.async_accept(next_->sock_, self_->strand_.wrap(*this));
 
-          MINFO("New connection to " << next_->sock_.remote_endpoint() << " / " << next_.get());
+          MINFO("New connection to " << next_->remote_endpoint() << " / " << next_.get());
 
           self_->remote_.emplace(next_);
           read_commands(std::move(next_));

@@ -57,6 +57,8 @@ namespace lws { namespace rpc { namespace scanner
     explicit connection(boost::asio::io_service& io);
     ~connection();
 
+    boost::asio::ip::tcp::endpoint remote_endpoint();
+
     //! \return ASIO compatible read buffer of `size`.
     boost::asio::mutable_buffer read_buffer(const std::size_t size);
 

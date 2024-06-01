@@ -67,7 +67,7 @@ namespace lws { namespace rpc { namespace scanner
       if (self_ && error != boost::asio::error::operation_aborted)
       {
         assert(self_->strand_.running_in_this_thread());
-        MERROR("Write timeout on socket (" << self_->sock_.remote_endpoint() << ")");
+        MERROR("Write timeout on socket (" << self_->remote_endpoint() << ")");
         self_->cleanup();
       }
     }
@@ -103,7 +103,7 @@ namespace lws { namespace rpc { namespace scanner
       {
         if (error != boost::asio::error::operation_aborted)
         {
-          MERROR("Write error on socket (" << self_->sock_.remote_endpoint() << "): " << error.message());
+          MERROR("Write error on socket (" << self_->remote_endpoint() << "): " << error.message());
           self_->cleanup();
         }
         self_->write_timeout_.cancel();
@@ -198,7 +198,7 @@ namespace lws { namespace rpc { namespace scanner
           write_buffers{self_}();
         else if (max_write_buffers <= self_->write_bufs_.size())
         {
-          MERROR("Exceeded max buffer size for connection: " << self_->sock_.remote_endpoint());
+          MERROR("Exceeded max buffer size for connection: " << self_->remote_endpoint());
           self_->cleanup();
         }
       }

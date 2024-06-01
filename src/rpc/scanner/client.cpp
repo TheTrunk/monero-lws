@@ -84,12 +84,18 @@ namespace lws { namespace rpc { namespace scanner
   {
     std::shared_ptr<client> self_;
 
-    void operator()(const boost::system::error_code& error) const
+    void operator()(const boost::system::error_code& error = {}) const
     {
       if (self_ && error != boost::asio::error::operation_aborted)
       {
+        // The `cleanup()` function is meant to cleanup then destruct connection
         assert(self_->strand_.running_in_this_thread());
-        self_->sock_.close();
+        boost::system::error_code error{};
+        self_->sock_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, error);
+        error = boost::system::error_code{};
+        self_->sock_.close(error);
+        if (error)
+          MERROR("Error when closing socket: " << error.message());
       }
     }
   };
@@ -122,7 +128,7 @@ namespace lws { namespace rpc { namespace scanner
           if (!self_->connect_timer_.cancel() || error)
           {
             MERROR("Connection attempt failed: " << error.message());
-            self_->sock_.close();
+            close{self_}();
           }
           else
             break;

@@ -44,6 +44,12 @@ namespace lws { namespace rpc { namespace scanner
   connection::~connection()
   {}
 
+  boost::asio::ip::tcp::endpoint connection::remote_endpoint()
+  {
+    boost::system::error_code error{};
+    return sock_.remote_endpoint(error);
+  }
+
   boost::asio::mutable_buffer connection::read_buffer(const std::size_t size)
   {
     assert(strand_.running_in_this_thread());
@@ -64,9 +70,14 @@ namespace lws { namespace rpc { namespace scanner
   {
     assert(strand_.running_in_this_thread());
     if (!cleanup_)
-      MINFO("Disconnected from " << sock_.remote_endpoint() << " / " << this);
+      MINFO("Disconnected from " << remote_endpoint() << " / " << this);
     cleanup_ = true;
-    sock_.close();
+    boost::system::error_code error{};
+    sock_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, error);
+    error = boost::system::error_code{};
+    sock_.close(error);
+    if (error)
+      MERROR("Error when closing socket: " << error.message());
     write_timeout_.cancel();
   }
 }}} // lws // rpc // scanner
