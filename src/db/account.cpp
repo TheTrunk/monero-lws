@@ -165,7 +165,7 @@ namespace lws
 
   void account::updated(db::block_id new_height) noexcept
   {
-    height_ = std::max(new_height, height_);
+    height_ = std::max(height_, new_height);
     spends_.clear();
     spends_.shrink_to_fit();
     outputs_.clear();
