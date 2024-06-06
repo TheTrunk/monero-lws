@@ -2798,8 +2798,13 @@ namespace db
             accounts_by_address.get_value<MONERO_FIELD(account_by_address, lookup)>(temp_value).value().status;
           MONERO_LMDB_CHECK(mdb_cursor_get(accounts_cur.get(), &key, &value, MDB_GET_BOTH));
         }
+
+        /* The check below is `<` instead of `!=` because of remote scanning -
+          a "check-in" can occur before the user accounts are replaced.
+          Duplicate writes should be supported as this (duplicate writes)
+          happened historically due to a different bug involving scan heights.*/
         expect<account> existing = accounts.get_value<account>(value);
-        if (!existing || existing->scan_height != user->scan_height())
+        if (!existing || existing->scan_height < user->scan_height())
           continue; // to next account
 
         const block_id existing_height = existing->scan_height;
