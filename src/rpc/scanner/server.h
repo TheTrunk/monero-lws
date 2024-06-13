@@ -26,12 +26,14 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #pragma once
 
+#include <array>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <memory>
 #include <set>
+#include <sodium/crypto_pwhash.h>
 #include <string>
 
 #include "db/fwd.h"
@@ -63,10 +65,11 @@ namespace lws { namespace rpc { namespace scanner
     std::vector<db::account_id> active_;
     db::storage disk_;
     rpc::client zclient_;
-    std::string pass_;
     lmdb::suspended_txn read_txn_;
     db::cursor::accounts accounts_cur_;
     std::size_t next_thread_;
+    std::array<unsigned char, 32> pass_hashed_;
+    std::array<unsigned char, crypto_pwhash_SALTBYTES> pass_salt_;
     const ssl_verification_t webhook_verify_;
 
     //! Async acceptor routine
@@ -88,8 +91,9 @@ namespace lws { namespace rpc { namespace scanner
     server& operator=(server&&) = delete;
 
     //! \return True if `pass` matches expected
-    bool check_pass(const std::string& pass) const noexcept 
-    { return pass_ == pass; }
+    bool check_pass(const std::string& pass) const noexcept;
+
+    void compute_hash(std::array<unsigned char, 32>& out, const std::string& pass) const noexcept;
 
     //! Start listening for incoming connections on `address`.
     static void start_acceptor(const std::shared_ptr<server>& self, const std::string& address, std::string pass);

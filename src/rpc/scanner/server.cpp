@@ -30,6 +30,8 @@
 #include <boost/asio/coroutine.hpp>
 #include <boost/lexical_cast.hpp>
 #include <boost/numeric/conversion/cast.hpp>
+#include <sodium/utils.h>
+#include <sodium/randombytes.h>
 #include <vector>
 #include "byte_slice.h"    // monero/contrib/epee/include
 #include "byte_stream.h"   // monero/contrib/epee/include
@@ -430,10 +432,11 @@ namespace lws { namespace rpc { namespace scanner
       active_(std::move(active)),
       disk_(std::move(disk)),
       zclient_(std::move(zclient)),
-      pass_(),
       read_txn_{},
       accounts_cur_{},
       next_thread_(0),
+      pass_hashed_(),
+      pass_salt_(),
       webhook_verify_(webhook_verify)
   {
     std::sort(active_.begin(), active_.end());
@@ -442,10 +445,36 @@ namespace lws { namespace rpc { namespace scanner
       if (!local)
         MONERO_THROW(common_error::kInvalidArgument, "given nullptr local queue");
     }
+
+    std::memset(pass_hashed_.data(), 0, pass_hashed_.size());
+    randombytes_buf(pass_salt_.data(), pass_salt_.size());
   }
 
   server::~server() noexcept
   {}
+
+  bool server::check_pass(const std::string& pass) const noexcept
+  {
+    std::array<unsigned char, 32> out;
+    std::memset(out.data(), 0, out.size());
+    compute_hash(out, pass);
+    return sodium_memcmp(out.data(), pass_hashed_.data(), out.size()) == 0;
+  }
+
+  void server::compute_hash(std::array<unsigned char, 32>& out, const std::string& pass) const noexcept
+  {
+    if (out.size() < crypto_pwhash_BYTES_MIN)
+      MONERO_THROW(error::crypto_failure, "Invalid output size");
+    if (crypto_pwhash_BYTES_MAX < out.size())
+      MONERO_THROW(error::crypto_failure, "Invalid output size");
+
+    if (pass.size() < crypto_pwhash_PASSWD_MIN && crypto_pwhash_PASSWD_MAX < pass.size())
+      MONERO_THROW(error::crypto_failure, "Invalid password size");
+
+    if (crypto_pwhash(out.data(), out.size(), pass.data(), pass.size(), pass_salt_.data(),
+          crypto_pwhash_OPSLIMIT_MIN, crypto_pwhash_MEMLIMIT_MIN, crypto_pwhash_ALG_DEFAULT) != 0)
+      MONERO_THROW(error::crypto_failure, "Failed password hashing");
+  }
 
   void server::start_acceptor(const std::shared_ptr<server>& self, const std::string& address, std::string pass)
   {
@@ -463,7 +492,8 @@ namespace lws { namespace rpc { namespace scanner
         self->acceptor_.listen();
 
         MINFO("Listening at " << endpoint << " for scanner clients");
-        self->pass_ = pass;
+
+        self->compute_hash(self->pass_hashed_, pass);
         acceptor{std::move(self)}();
       });
   }
