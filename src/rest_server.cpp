@@ -654,7 +654,11 @@ namespace lws
         const std::uint64_t per_byte_fee =
           resp->estimated_base_fee / resp->size_scale;
 
-        return response{per_byte_fee, resp->fee_mask, rpc::safe_uint64(received), std::move(unspent), resp->fees, std::move(req.creds.key)};
+        // Build fee estimates - use estimated_base_fee since fees array may not be available
+        std::vector<std::uint64_t> fees;
+        fees.push_back(resp->estimated_base_fee);
+
+        return response{per_byte_fee, resp->fee_mask, rpc::safe_uint64(received), std::move(unspent), std::move(fees), std::move(req.creds.key)};
 
       }
     };
