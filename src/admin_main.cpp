@@ -301,8 +301,8 @@ namespace
     {
       for (const auto& dict : *subaddrs)
       {
-        for (const auto& range : dict.second)
-          subaddress_count += (std::uint32_t(range.second) - std::uint32_t(range.first) + 1);
+        for (const auto& range : dict.second.values)
+          subaddress_count += (std::uint32_t(range[1]) - std::uint32_t(range[0]) + 1);
       }
     }
 
@@ -326,7 +326,7 @@ namespace
       wire::field("balance", total_received - total_spent),
       wire::field("subaddress_count", subaddress_count),
       wire::field("pending_import_request", import_req.has_value()),
-      wire::field("flags", account.flags),
+      wire::field("flags", std::uint8_t(account.flags)),
       wire::field("outputs", wire::array(output_list))
     );
 
