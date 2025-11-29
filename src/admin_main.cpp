@@ -301,7 +301,7 @@ namespace
     {
       for (const auto& dict : *subaddrs)
       {
-        for (const auto& range : dict.second.values)
+        for (const auto& range : dict.second.container)
           subaddress_count += (std::uint32_t(range[1]) - std::uint32_t(range[0]) + 1);
       }
     }
