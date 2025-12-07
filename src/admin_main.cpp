@@ -309,6 +309,10 @@ namespace
     // Check for pending import request
     const auto import_req = reader.get_request(lws::db::request::import_scan, address);
 
+    // Pointer is nullptr when not showing sensitive data
+    lws::db::view_key const* const key =
+      prog.show_sensitive ? std::addressof(account.key) : nullptr;
+
     wire::json_stream_writer json{out};
     wire::object(json,
       wire::field("address", lws::db::address_string(address)),
@@ -327,11 +331,9 @@ namespace
       wire::field("subaddress_count", subaddress_count),
       wire::field("pending_import_request", import_req.has_value()),
       wire::field("flags", std::uint8_t(account.flags)),
-      wire::field("outputs", wire::array(output_list))
+      wire::field("outputs", wire::array(output_list)),
+      wire::optional_field("view_key", key)
     );
-
-    if (prog.show_sensitive)
-      wire::object(json, wire::field("view_key", std::cref(account.key)));
 
     json.finish();
   }
