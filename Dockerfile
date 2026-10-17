@@ -1,8 +1,8 @@
 # Initial base from https://github.com/sethforprivacy/monero-lws/blob/588c7f1965d3afbda8a65dc870645650e063e897/Dockerfile
 
 # Set monerod version to install from github
-ARG MONERO_BRANCH=v0.18.4.3
-ARG MONERO_COMMIT_HASH=7c6e84466a90f6701ebe09ff8f61ea8af3883181
+ARG MONERO_BRANCH=v0.18.5.1
+ARG MONERO_COMMIT_HASH=4f92268d7c16741cfb41e5bbe2aa46cc260a9ea5
 
 # Select ubuntu:22.04 for the build image base
 FROM ubuntu:22.04 as build
@@ -46,22 +46,22 @@ ENV USE_SINGLE_BUILDDIR 1
 ENV BOOST_DEBUG         1
 
 # Build expat, a dependency for libunbound
-RUN set -ex && wget https://github.com/libexpat/libexpat/releases/download/R_2_7_3/expat-2.7.3.tar.bz2 && \
-    echo "59c31441fec9a66205307749eccfee551055f2d792f329f18d97099e919a3b2f expat-2.7.3.tar.bz2" | sha256sum -c && \
-    tar -xf expat-2.7.3.tar.bz2 && \
-    rm expat-2.7.3.tar.bz2 && \
-    cd expat-2.7.3 && \
+RUN set -ex && wget https://github.com/libexpat/libexpat/releases/download/R_2_8_3/expat-2.8.3.tar.bz2 && \
+    echo "b4cc2483927d5e90bf8c40b44a6b95b368b42a8a96e25883fce188b48a92b670 expat-2.8.3.tar.bz2" | sha256sum -c && \
+    tar -xf expat-2.8.3.tar.bz2 && \
+    rm expat-2.8.3.tar.bz2 && \
+    cd expat-2.8.3 && \
     ./configure --enable-static --disable-shared --prefix=/usr && \
     make -j${NPROC:-$(nproc)} && \
     make -j${NPROC:-$(nproc)} install
 
 # Build libunbound for static builds
 WORKDIR /tmp
-RUN set -ex && wget https://www.nlnetlabs.nl/downloads/unbound/unbound-1.24.2.tar.gz && \
-    echo "44e7b53e008a6dcaec03032769a212b46ab5c23c105284aa05a4f3af78e59cdb unbound-1.24.2.tar.gz" | sha256sum -c && \
-    tar -xzf unbound-1.24.2.tar.gz && \
-    rm unbound-1.24.2.tar.gz && \
-    cd unbound-1.24.2 && \
+RUN set -ex && wget https://www.nlnetlabs.nl/downloads/unbound/unbound-1.25.2.tar.gz && \
+    echo "0d92275c703d5f5f8baba3dab22117dd8c29b495588a5c229768ed6581566600 unbound-1.25.2.tar.gz" | sha256sum -c && \
+    tar -xzf unbound-1.25.2.tar.gz && \
+    rm unbound-1.25.2.tar.gz && \
+    cd unbound-1.25.2 && \
     ./configure --disable-shared --enable-static --without-pyunbound --with-libexpat=/usr --with-ssl=/usr --with-libevent=no --without-pythonmodule --disable-flto --with-pthreads --with-libunbound-only --with-pic && \
     make -j${NPROC:-$(nproc)} && \
     make -j${NPROC:-$(nproc)} install
@@ -79,11 +79,11 @@ RUN set -ex && wget https://github.com/zeromq/libzmq/releases/download/v4.3.5/ze
 
 # Build boost for latest security updates
 WORKDIR /tmp
-RUN set -ex && wget https://archives.boost.io/release/1.89.0/source/boost_1_89_0.tar.bz2 && \
-    echo "85a33fa22621b4f314f8e85e1a5e2a9363d22e4f4992925d4bb3bc631b5a0c7a boost_1_89_0.tar.bz2" | sha256sum -c && \
-    tar -xf boost_1_89_0.tar.bz2 && \
-    rm boost_1_89_0.tar.bz2 && \
-    cd boost_1_89_0 && \
+RUN set -ex && wget https://archives.boost.io/release/1.92.0/source/boost_1_92_0.tar.bz2 && \
+    echo "5c1d40cb8e19adbf740a4ec2da35b3e58f3f5804b1dce44deb53df72193cbc6c boost_1_92_0.tar.bz2" | sha256sum -c && \
+    tar -xf boost_1_92_0.tar.bz2 && \
+    rm boost_1_92_0.tar.bz2 && \
+    cd boost_1_92_0 && \
     ./bootstrap.sh && \
     ./b2 -j${NPROC:-$(nproc)} runtime-link=static link=static threading=multi variant=release \
       --with-chrono --with-context --with-coroutine --with-date_time --with-filesystem --with-locale \
